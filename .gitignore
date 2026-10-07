@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+
+# Node / console
+node_modules/
+.next/
+out/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+.terraform.lock.hcl
+
+# Kubeconfig / local secrets
+kubeconfig*
+*.kubeconfig
+.env
+.env.*
+!.env.example
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local data volumes
+.data/
+
+# AI tooling artifacts — never committed to this repo
+CLAUDE.md
+AGENTS.md
+.claude/
+.cursor/
+.aider*

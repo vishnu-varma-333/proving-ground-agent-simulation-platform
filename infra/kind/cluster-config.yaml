@@ -1,0 +1,35 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: proving-ground
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30432
+        hostPort: 25432
+        protocol: TCP
+      - containerPort: 30123
+        hostPort: 28123
+        protocol: TCP
+      - containerPort: 30900
+        hostPort: 29000
+        protocol: TCP
+      - containerPort: 30422
+        hostPort: 24222
+        protocol: TCP
+      - containerPort: 30822
+        hostPort: 28222
+        protocol: TCP
+      - containerPort: 30901
+        hostPort: 29001
+        protocol: TCP
+      - containerPort: 30902
+        hostPort: 29002
+        protocol: TCP
+      - containerPort: 30903
+        hostPort: 29090
+        protocol: TCP
+      - containerPort: 30904
+        hostPort: 23000
+        protocol: TCP
+  - role: worker
+  - role: worker
