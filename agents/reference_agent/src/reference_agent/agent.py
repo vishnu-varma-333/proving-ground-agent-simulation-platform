@@ -14,14 +14,26 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import re
 
+import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
 
 from reference_agent.mcp_tools import MockServiceToolbox
 
-DEFAULT_MODEL = "gemini-3.8-flash"
+# Quota is tracked per (API key, model) pair - confirmed live via each 429's
+# own quotaId naming the model (e.g.
+# "GenerateRequestsPerDayPerProjectPerModel-FreeTier") - so a different
+# model on the SAME key is a genuinely separate daily budget, not a
+# workaround that merely feels like one. Free-tier RPD differs hugely by
+# model (per ai.google.dev/gemini-api/docs/rate-limits: the lite tier is
+# ~500/day vs. the full flash tier's ~20/day), and this agent's own task
+# (a handful of simple lookup/refund/email tool calls) doesn't need
+# frontier-level reasoning, so the cheap/high-quota model goes first.
+MODEL_CANDIDATES = ("gemini-flash-lite-latest", "gemini-3.8-flash")
+DEFAULT_MODEL = MODEL_CANDIDATES[0]
 
 SYSTEM_INSTRUCTION = """\
 You are a customer-support agent for an online electronics store.
@@ -44,6 +56,15 @@ MAX_MODEL_RETRIES = 3
 MAX_RETRY_DELAY_SECONDS = 20.0
 RETRYABLE_STATUS_CODES = {429, 500, 503, 504}
 
+# google-genai leaves HttpOptions.timeout unset by default, which means NO
+# timeout reaches the underlying httpx client at all (None means "wait
+# forever", not "use some sane default"). Observed live: a stalled request
+# with this unset blocked silently for 30+ minutes with zero output and
+# zero exception, because nothing ever fired to interrupt it - not a retry
+# problem, there was nothing for a retry wrapper to catch. Every request
+# gets this bound explicitly for that reason.
+REQUEST_TIMEOUT_MS = 30_000
+
 # A 429 suggesting a wait longer than this is the free tier's *daily* quota
 # talking (observed live: "Please retry in 22h36m...") - not the kind of
 # brief throttle worth sleeping through. Rotate to the next configured key
@@ -52,53 +73,91 @@ RETRYABLE_STATUS_CODES = {429, 500, 503, 504}
 KEY_EXHAUSTED_THRESHOLD_SECONDS = 120.0
 
 
+_KEY_VAR_PATTERN = re.compile(r"^GEMINI_API_KEY_?(\d*)$")
+
+
 def load_api_keys() -> list[str]:
-    """GEMINI_API_KEY, plus GEMINI_API_KEY_2, GEMINI_API_KEY_3, ... if
-    present. Multiple personal free-tier keys are a dev-time workaround for
-    the 20-requests/day cap (see DECISIONS.md) - not how the platform's
-    own model-call layer will handle cost/throughput in Milestone 3+."""
-    keys = []
-    primary = os.environ.get("GEMINI_API_KEY")
-    if primary:
-        keys.append(primary)
-    i = 2
-    while True:
-        extra = os.environ.get(f"GEMINI_API_KEY_{i}")
-        if not extra:
-            break
-        keys.append(extra)
-        i += 1
-    return keys
+    """Every env var matching GEMINI_API_KEY, GEMINI_API_KEY2,
+    GEMINI_API_KEY_2, GEMINI_API_KEY5, ... - any numeric suffix, with or
+    without an underscore, gaps allowed. Deliberately lenient: observed
+    live that keys added by hand didn't follow a fixed convention (one
+    arrived as GEMINI_API_KEY2, a later one as GEMINI_API_KEY5 with no
+    GEMINI_API_KEY/2/3/4 ever set) - a strict sequential scanner silently
+    missed keys that didn't fit the pattern it expected. Sorted so
+    GEMINI_API_KEY (bare, suffix "") always goes first, then by numeric
+    suffix. Multiple personal free-tier keys are a dev-time workaround for
+    the daily quota cap (see DECISIONS.md) - not how the platform's own
+    model-call layer will handle cost/throughput in Milestone 3+."""
+    matches = []
+    for name, value in os.environ.items():
+        if not value:
+            continue
+        m = _KEY_VAR_PATTERN.match(name)
+        if m:
+            suffix = m.group(1)
+            order = -1 if suffix == "" else int(suffix)
+            matches.append((order, value))
+    matches.sort(key=lambda pair: pair[0])
+    return [value for _, value in matches]
 
 
 class ReferenceAgent:
     def __init__(
         self,
         toolbox: MockServiceToolbox,
-        model: str = DEFAULT_MODEL,
+        model: str | None = None,
         api_keys: list[str] | None = None,
     ) -> None:
+        """`model=None` (the default) rotates across MODEL_CANDIDATES on
+        quota exhaustion; passing an explicit model pins to just that one
+        (used by tests that don't care about model rotation)."""
         self._toolbox = toolbox
-        self._model = model
+        self._models = [model] if model is not None else list(MODEL_CANDIDATES)
+        self._model_index = 0
         self._api_keys = api_keys if api_keys is not None else load_api_keys()
         if not self._api_keys:
             raise RuntimeError("no Gemini API key set (GEMINI_API_KEY)")
         self._key_index = 0
-        self._client = genai.Client(api_key=self._api_keys[0])
+        self._client = self._make_client(self._api_keys[0])
         self._tool = types.Tool(function_declarations=toolbox.function_declarations)
         self._contents: list[types.Content] = []
 
-    def _rotate_key(self) -> bool:
-        if self._key_index + 1 >= len(self._api_keys):
-            return False
-        self._key_index += 1
-        self._client = genai.Client(api_key=self._api_keys[self._key_index])
-        print(
-            f"[reference_agent] key {self._key_index} exhausted its quota, "
-            f"switching to key {self._key_index + 1}/{len(self._api_keys)}",
-            flush=True,
+    @property
+    def _model(self) -> str:
+        return self._models[self._model_index]
+
+    @staticmethod
+    def _make_client(api_key: str) -> genai.Client:
+        return genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(timeout=REQUEST_TIMEOUT_MS),
         )
-        return True
+
+    def _rotate_slot(self) -> bool:
+        """Quota is exhausted for the current (key, model) pair. Try the
+        next model on the SAME key first (a separate quota bucket, same
+        account - decision 9/MODEL_CANDIDATES above); only rotate to the
+        next key once every model has been tried on this one."""
+        if self._model_index + 1 < len(self._models):
+            self._model_index += 1
+            print(
+                f"[reference_agent] {self._models[self._model_index - 1]} exhausted its "
+                f"quota on key {self._key_index + 1}, switching to model "
+                f"{self._model!r}",
+                flush=True,
+            )
+            return True
+        if self._key_index + 1 < len(self._api_keys):
+            self._key_index += 1
+            self._model_index = 0
+            self._client = self._make_client(self._api_keys[self._key_index])
+            print(
+                f"[reference_agent] every model exhausted on key {self._key_index}, "
+                f"switching to key {self._key_index + 1}/{len(self._api_keys)}",
+                flush=True,
+            )
+            return True
+        return False
 
     async def respond(self, user_message: str) -> str:
         self._contents.append(
@@ -125,6 +184,16 @@ class ReferenceAgent:
 
         raise RuntimeError(f"agent did not produce a final answer within {MAX_TOOL_ROUNDS} tool rounds")
 
+    def _call_model(self) -> types.GenerateContentResponse:
+        return self._client.models.generate_content(
+            model=self._model,
+            contents=self._contents,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION,
+                tools=[self._tool],
+            ),
+        )
+
     async def _generate_with_retry(self) -> types.GenerateContentResponse:
         """The Gemini API genuinely returns transient 503s under load and
         429s on the free tier's quota (both observed live while building
@@ -132,21 +201,20 @@ class ReferenceAgent:
         4-5 calls through the tool-calling loop). A 429's response body
         names its own RetryInfo.retryDelay; honor that instead of a fixed
         backoff schedule for short waits, and rotate to the next API key
-        for long ones (the daily cap, not a brief throttle). Anything else
-        (bad request, auth, missing model) is a real bug and should raise
-        immediately, not be retried."""
+        for long ones (the daily cap, not a brief throttle). A timeout or
+        connect error (REQUEST_TIMEOUT_MS firing) is retried the same way
+        as a 503 - it's not quota-related, so never triggers key rotation.
+        Anything else (bad request, auth, missing model) is a real bug and
+        should raise immediately, not be retried."""
         last_error: Exception | None = None
         while True:
             for attempt in range(MAX_MODEL_RETRIES):
                 try:
-                    return self._client.models.generate_content(
-                        model=self._model,
-                        contents=self._contents,
-                        config=types.GenerateContentConfig(
-                            system_instruction=SYSTEM_INSTRUCTION,
-                            tools=[self._tool],
-                        ),
-                    )
+                    # generate_content is synchronous; run it off-thread so
+                    # it can't block the event loop (and so REQUEST_TIMEOUT_MS
+                    # is actually what bounds this call, not an unbounded
+                    # synchronous wait inside an async function).
+                    return await asyncio.to_thread(self._call_model)
                 except genai_errors.APIError as exc:
                     if exc.code not in RETRYABLE_STATUS_CODES:
                         raise
@@ -154,19 +222,23 @@ class ReferenceAgent:
                     suggested = _retry_delay_seconds(exc)
                     if suggested is not None and suggested > KEY_EXHAUSTED_THRESHOLD_SECONDS:
                         break  # this key's quota is done for a long while - rotate, don't sleep
-                    if attempt < MAX_MODEL_RETRIES - 1:
-                        # Capped rather than honored verbatim for short waits: a
-                        # quota blip can suggest ~60s, and that compounds across
-                        # every tool-calling round in one respond() call
-                        # (observed live: an uncapped version of this once hung
-                        # for 30+ minutes mid-conversation).
-                        delay = min(
-                            suggested or (2**attempt) + random.uniform(0, 1),
-                            MAX_RETRY_DELAY_SECONDS,
-                        )
-                        await asyncio.sleep(delay)
+                except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                    last_error = exc
+                    suggested = None
+
+                if attempt < MAX_MODEL_RETRIES - 1:
+                    # Capped rather than honored verbatim for short waits: a
+                    # quota blip can suggest ~60s, and that compounds across
+                    # every tool-calling round in one respond() call
+                    # (observed live: an uncapped version of this once hung
+                    # for 30+ minutes mid-conversation).
+                    delay = min(
+                        suggested or (2**attempt) + random.uniform(0, 1),
+                        MAX_RETRY_DELAY_SECONDS,
+                    )
+                    await asyncio.sleep(delay)
             # Exhausted this key's retry budget (or its quota is long-exhausted).
-            if not self._rotate_key():
+            if not self._rotate_slot():
                 assert last_error is not None
                 raise last_error
 

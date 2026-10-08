@@ -382,3 +382,71 @@ delete or replace once Milestone 3 builds the real model-call layer.
     9) once a 429's suggested delay exceeds `KEY_EXHAUSTED_THRESHOLD_SECONDS`
     (120s) - a short delay is treated as transient and retried on the same
     key, a long one triggers rotation instead of a long sleep.
+
+## 10. Model rotation alongside key rotation, cheap model first
+
+**Options considered:** Rotate only across API keys (one model, several
+accounts); rotate only across models (one key, several models); rotate
+across both, cheapest/highest-quota model first.
+
+**Chosen:** Both. `MODEL_CANDIDATES = ("gemini-flash-lite-latest",
+"gemini-3.8-flash")`, tried in that order on every key before moving to
+the next key.
+
+**Why:** A 429's `quotaId` names the model explicitly
+(`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), confirming quota is
+tracked per (key, model) pair - a different model on the SAME key is a
+genuinely separate daily budget, not a trick that merely feels like one.
+Per ai.google.dev/gemini-api/docs/rate-limits, the lite tier's free RPD is
+roughly 25x the full flash tier's (~500 vs ~20) - and this agent's actual
+task (a handful of simple lookup/refund/email tool calls) doesn't need
+frontier-level reasoning, so trying the cheap/high-quota model first
+multiplies effective daily capacity for free, before ever touching a
+second account.
+
+**Cost:** One more thing to explain if asked "why does the agent sometimes
+answer with a different model" - mitigated by the rotation logging a
+clear line every time it switches. Output quality across the two models
+wasn't A/B compared; for this agent's narrow task both produced correct
+tool-calling behavior in testing.
+
+---
+
+## Real bugs found while building Milestone 2 (continued)
+
+15. **The true root cause of the 30+ minute hangs wasn't retry logic at
+    all - it was the complete absence of an HTTP request timeout.**
+    `google.genai.types.HttpOptions.timeout` is `None` by default, and
+    the SDK passes that straight through to httpx, where `None` means
+    "wait forever," not "use a sane default." A stalled request (observed
+    live, twice) blocked silently with zero output and zero exception for
+    the full 30-minute harness limit, because nothing ever fired to
+    interrupt it - every earlier "fix" to the retry *schedule* was
+    correctly bounding a code path that was never the one hanging.
+    Diagnosed by reading `_api_client.py`'s own `retry_args()`: with no
+    `retry_options` set, the SDK's internal tenacity wrapper uses
+    `stop_after_attempt(1)` (confirmed NOT the cause either - it doesn't
+    retry internally by default). Fixed by setting
+    `HttpOptions(timeout=30_000)` (milliseconds) explicitly on every
+    client, and by running the synchronous `generate_content()` call via
+    `asyncio.to_thread` so a stall can't also block the event loop.
+
+16. **A free-tier key can be denied outright (403), independent of
+    quota.** One of five personal accounts' keys returned
+    `403 PERMISSION_DENIED: "Your project has been denied access. Please
+    contact support."` - not a 429, not a 503, not fixable by any retry
+    or rotation logic, and correctly NOT retried (403 isn't in
+    `RETRYABLE_STATUS_CODES`). Likely Google's abuse detection on rapid
+    multi-account free-tier key creation. No code fix exists for this -
+    it's an account-level state only the account owner can resolve.
+
+17. **The API-key loader's sequential scan silently missed keys that
+    didn't fit the pattern it expected.** First version required
+    `GEMINI_API_KEY`, then `GEMINI_API_KEY_2`, `_3`, ... with no gaps,
+    stopping at the first missing index. A key added by hand arrived as
+    `GEMINI_API_KEY5` with no `GEMINI_API_KEY`/`_2`/`_3`/`_4` ever set -
+    the loader found zero keys and the agent failed with "no Gemini API
+    key set" despite a real key being present in the environment. Fixed
+    with a regex scan (`^GEMINI_API_KEY_?(\d*)$`) over all of
+    `os.environ`, sorted by suffix, accepting any numbering gaps or
+    spelling.

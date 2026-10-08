@@ -6,7 +6,7 @@ as a teaching curriculum later.
 
 - [x] **1. Foundations** — Repository, CI, local Kubernetes, PostgreSQL,
       ClickHouse, NATS, object storage, observability.
-- [ ] **2. Reference agent and mock services** — A customer-support agent
+- [x] **2. Reference agent and mock services** — A customer-support agent
       plus orders, payments and email mock services with SQLite state.
 - [ ] **3. SDK and recording** — Python SDK intercepting model calls, tool
       calls and clock reads; tapes written to S3(-compatible storage).
@@ -112,9 +112,7 @@ one command, with CI exercising the same bring-up on every push.
 
 ## Milestone 2: Reference agent and mock services
 
-**Status:** In progress — core functionality live-verified end-to-end;
-a couple of failure-mode checks still pending (see below).
-**Started:** 2026-10-08.
+**Status:** Done, live-verified. **Started / finished:** 2026-10-08.
 
 **Goal.** The first real application code: a customer-support reference
 agent that actually works, backed by three mock services (orders,
@@ -139,16 +137,17 @@ everything else will run thousands of scenarios against.
 - `ReferenceAgent` (`agents/reference_agent`): connects to all three MCP
   servers as real subprocesses, adapts their tool schemas into Gemini
   function declarations, and runs the tool-calling loop (Gemini via
-  `google-genai`, decision 9) with jittered/bounded retry on transient
-  errors and automatic rotation across multiple API keys when one's quota
-  is exhausted.
+  `google-genai`) with a 30s per-request timeout, bounded jittered
+  retry on transient errors, and automatic rotation across models
+  (cheap/high-quota first) and then API keys when one combination's
+  quota is exhausted (decisions 9-10).
 - `scripts/smoke_test_mcp.py`: spins up each MCP server as a real
   subprocess over real stdio and exercises one real tool call per
   service — the protocol layer itself, not just the underlying Python
   functions.
-- 17 unit tests (10 for the three services' DB/tool logic including
-  refund idempotency and rejection paths, 7 for the agent's retry-delay
-  parsing and key-rotation logic) — all passing, `ruff check` clean.
+- 19 unit tests (10 for the three services' DB/tool logic including
+  refund idempotency and rejection paths, 9 for the agent's retry-delay
+  parsing and key/model-rotation logic) — all passing, `ruff check` clean.
 
 **Real bugs found and fixed** (full detail in DECISIONS.md):
 7. `uv sync` with no flags silently skips every workspace member.
@@ -168,6 +167,22 @@ everything else will run thousands of scenarios against.
 14. The Gemini free tier's binding constraint is 20 requests/*day* per
     model, not just 5/minute — found only by continuing to hit it after
     "fixing" the per-minute case.
+15. The *actual* root cause of the 30+ minute hangs was never the retry
+    schedule - it was `HttpOptions.timeout` being unset, which means no
+    timeout reaches httpx at all (`None` = wait forever). Every earlier
+    retry fix was correctly bounding a code path that was never the one
+    hanging. Fixed with an explicit 30s timeout plus running the
+    (synchronous) model call via `asyncio.to_thread`.
+16. A free-tier key can be denied outright (`403 PERMISSION_DENIED`,
+    "project has been denied access"), independent of quota and not
+    fixable by any retry/rotation logic - likely Google's abuse detection
+    on rapid multi-account key creation. Correctly not retried; no code
+    fix exists for this, it needs the account owner's attention.
+17. The API-key loader's sequential scanner silently missed keys that
+    didn't follow its expected naming - a key arrived as
+    `GEMINI_API_KEY5` with no `GEMINI_API_KEY`/`_2`/`_3`/`_4` ever set,
+    and the agent failed with "no API key set" despite a real key being
+    present. Fixed with a regex scan over the whole environment.
 
 **Live verification performed (not just unit tests):**
 - Real stdio MCP protocol smoke test against all three services
@@ -177,20 +192,19 @@ everything else will run thousands of scenarios against.
   agent for a refund on a real seeded order. The agent looked up the
   order, looked up the payment, issued the refund, updated the order
   status, and sent a confirmation email — all through real tool calls,
-  no mocked model responses. Verified the result wasn't just a plausible-
-  sounding reply by reading the actual SQLite rows afterward: order
-  status `refunded`, payment status `refunded`, exactly one `refunds` row
-  with the correct amount and reason, exactly one email recorded with the
+  no mocked model responses. Verified by reading the actual SQLite rows
+  afterward, not by trusting the agent's own summary: order status
+  `refunded`, payment status `refunded`, exactly one `refunds` row with
+  the correct amount and reason, exactly one email recorded with the
   right recipient and subject.
-
-**Still pending (not dropped, just blocked on the real external
-constraint found in bug 14 — more API key quota):**
-- Duplicate-refund idempotency *through the full agent* (not just the
-  service layer, which is already unit-tested): ask for the same refund
-  twice in separate conversations, confirm still exactly one `refunds`
-  row. First live attempt hit the free-tier daily quota mid-test.
-- An unknown-order scenario through the full agent (should decline
-  plainly rather than hallucinate order/payment details).
-- A benchmark of real per-call latency and a rough per-scenario cost
-  estimate for `docs/BENCHMARKS.md`, once enough quota is available to
-  measure more than one or two calls without tripping the daily cap.
+- **Duplicate-refund idempotency through the full agent**: asked for the
+  same refund again in a separate conversation. The agent correctly
+  reported it was already refunded rather than attempting it again;
+  `refunds` table still had exactly one row for that order, same id as
+  before.
+- **Unknown-order scenario**: asked for a refund on an order id that
+  doesn't exist. The agent declined plainly ("could not be found")
+  instead of hallucinating order or payment details; verified zero new
+  rows in any of the three databases as a result.
+- A second real refund (a different order) to get a clean timing number
+  without reusing already-refunded state — see docs/BENCHMARKS.md.

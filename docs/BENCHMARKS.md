@@ -84,3 +84,55 @@ it.
   scheduler, snapshot/fault logic, evaluation judges). Listed here rather
   than silently omitted, per this document's own rule: nothing is measured
   before it can be measured for real.
+
+---
+
+## Milestone 2: Reference agent and mock services
+
+### Per-conversation-turn latency (live Gemini API)
+
+**What:** Wall-clock time for one `python -m reference_agent "<message>"`
+invocation, from process start to final printed answer - includes Python/
+MCP-subprocess startup, every tool call and every model round trip.
+
+**How measured:** macOS `time` builtin, real Gemini API (`gemini-flash-
+lite-latest`), real MCP subprocesses, real SQLite files already seeded
+from an earlier run (not a cold database).
+
+| Scenario | Model round trips | Result |
+| --- | --- | --- |
+| Read-only lookup ("what is the status of order ord_1002?") | 2 (tool call + final answer) | 5.09s real (1.83s user / 0.22s sys - most of the wall time is the network round trip, not local CPU) |
+| Full refund (lookup order, lookup payment, issue refund, update status, send email, final answer) | up to 6 | 9.75s real (1.83s user / 0.20s sys) |
+
+Both are single, cold-start-of-the-process measurements (no warm
+connection reuse), on a free-tier key with no other concurrent load. Not
+yet measured: p50/p95 across many runs, or any number under real
+concurrent load - meaningless before Milestone 6's distributed engine
+exists to generate that load.
+
+### Free-tier quota, measured directly from live 429 responses
+
+Not an estimate - read directly from the API's own error bodies while
+building and testing this milestone:
+
+| Model | Quota metric | Free-tier limit |
+| --- | --- | --- |
+| `gemini-3.8-flash` | `GenerateRequestsPerMinutePerProjectPerModel-FreeTier` | 5/minute |
+| `gemini-3.8-flash` | `GenerateRequestsPerDayPerProjectPerModel-FreeTier` | 20/day |
+| `gemini-flash-lite-latest` (`gemini-3.5-flash-lite`) | (per ai.google.dev/gemini-api/docs/rate-limits, not independently hit yet) | ~500/day |
+
+A single full refund conversation costs up to 6 model round trips - on
+`gemini-3.8-flash` alone, that's less than 4 complete refund
+conversations before exhausting the entire *day's* quota. This is the
+concrete number behind decision 10 (model rotation) and the standing
+flag that this project's real goal - thousands of simulations
+(Milestone 6+) - needs a paid key regardless of how many free ones are
+rotated through.
+
+### What's deliberately not benchmarked yet
+
+Everything from the spec's metrics table that needs the SDK, scheduler,
+or evaluation judges - unchanged from Milestone 1's note. Added to that
+list now: real per-call *cost* in dollars (needs the actual pricing page
+cross-referenced with real token counts, not done yet) and judge-model
+latency/accuracy (Milestone 8).
