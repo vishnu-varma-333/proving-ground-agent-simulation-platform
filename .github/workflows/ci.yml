@@ -14,18 +14,20 @@ jobs:
 
       - name: Install kind
         run: |
-          curl -fsSL -o /usr/local/bin/kind \
+          mkdir -p "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          curl -fsSL -o "$HOME/.local/bin/kind" \
             "https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64"
-          chmod +x /usr/local/bin/kind
-          kind version
+          chmod +x "$HOME/.local/bin/kind"
+          "$HOME/.local/bin/kind" version
 
       - name: Install kubectl
         run: |
           KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
-          curl -fsSL -o /usr/local/bin/kubectl \
+          curl -fsSL -o "$HOME/.local/bin/kubectl" \
             "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-          chmod +x /usr/local/bin/kubectl
-          kubectl version --client
+          chmod +x "$HOME/.local/bin/kubectl"
+          "$HOME/.local/bin/kubectl" version --client
 
       - name: Bring up local stack
         run: ./scripts/up.sh
