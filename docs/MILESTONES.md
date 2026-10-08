@@ -52,8 +52,7 @@ one command, with CI exercising the same bring-up on every push.
 - `scripts/up.sh` / `down.sh` / `health-check.sh` and a `Makefile` wrapping
   them (`make up` / `make down` / `make health`).
 - `.gitignore` covering Python/Node/Terraform artifacts and proactively
-  excluding `CLAUDE.md`, `AGENTS.md`, `.claude/` and similar AI-tooling
-  droppings from ever being committed.
+  excluding stray local tooling/config files from ever being committed.
 - Tooling installed user-locally (no Homebrew): `helm` (official release
   binary), `uv` (official installer) managing a project-local Python 3.12.
 
