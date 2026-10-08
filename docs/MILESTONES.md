@@ -8,7 +8,7 @@ as a teaching curriculum later.
       ClickHouse, NATS, object storage, observability.
 - [x] **2. Reference agent and mock services** — A customer-support agent
       plus orders, payments and email mock services with SQLite state.
-- [ ] **3. SDK and recording** — Python SDK intercepting model calls, tool
+- [x] **3. SDK and recording** — Python SDK intercepting model calls, tool
       calls and clock reads; tapes written to S3(-compatible storage).
 - [ ] **4. Deterministic replay** — Replay from tape; determinism test suite
       passing.
@@ -207,3 +207,64 @@ everything else will run thousands of scenarios against.
   rows in any of the three databases as a result.
 - A second real refund (a different order) to get a clean timing number
   without reusing already-refunded state — see docs/BENCHMARKS.md.
+
+---
+
+## Milestone 3: SDK and recording
+
+**Status:** Done, live-verified. **Started / finished:** 2026-10-08.
+
+**Goal.** The piece that makes the platform's core promise possible: a
+Python SDK sitting between an agent and its three sources of
+non-determinism - model calls, tool calls, clock reads - recording every
+one to a content-addressed tape in S3-compatible storage. No replay yet
+(Milestone 4); this milestone only needs every call the reference agent
+makes to be captured faithfully and verifiably, by an agent that doesn't
+need the SDK to run at all if recording isn't turned on.
+
+**What got built:**
+- `sdk/pg_sdk` (new uv workspace member): `hashing.py` (canonical JSON +
+  sha256, so identical content always hashes the same regardless of dict
+  key order), `storage.py` (`BlobStore`, an S3-compatible client -
+  SeaweedFS locally, real S3 in prod, same API - with real dedup via a
+  HEAD-check before every blob upload), `recorder.py` (`Recorder`:
+  sequences steps, hashes and stores each one's request/response,
+  produces an ordered manifest), `clock.py` (`RecordingClock`: records
+  every real-time read; Milestone 5 makes this a simulated clock).
+- Wired into `agents/reference_agent`: `ReferenceAgent` takes an optional
+  `recorder` (decision 13 - opt-in, zero platform dependency when
+  omitted); all three call sites instrumented (`_call_model`, the
+  tool-calling loop in `respond()`, and one clock read per message). The
+  CLI gained `--record`, which creates a run id, records the whole
+  conversation, and prints the step count on exit.
+- `scripts/smoke_test_tape.py`: writes and reads back a blob, a step, and
+  a manifest through the real `BlobStore` API, independent of unit tests.
+- 10 new unit tests (hashing stability, recorder sequencing, content-
+  addressing dedup, manifest shape) against a fake in-memory store - 29
+  total across the whole project, all passing, `ruff check` clean.
+
+**Real bugs found:** none this milestone - stated plainly in DECISIONS.md
+rather than searched for one to report. Milestones 1-2 had already
+forced out the registry-mirror, bucket-race, ClickHouse-auth and MCP-
+version issues; this milestone's actual new surface area (hashing, S3
+object layout, the dict-conversion boundary) was smaller and already
+covered by unit tests before touching real storage.
+
+**Live verification performed (not just unit tests):**
+- `scripts/smoke_test_tape.py` against the real local SeaweedFS S3
+  gateway (Milestone 1's cluster, brought back up for this): blob,
+  step and manifest all round-tripped through actual object storage,
+  read back independently of the code that wrote them.
+- **Full reference-agent conversation with `--record`** against the real
+  Gemini API and real MCP tool calls: produced a real 4-step tape
+  (clock → model → tool → model), fetched the manifest directly from
+  S3 afterward and confirmed the step order and kinds, then fetched the
+  tool-call blob's actual bytes and confirmed they matched the real
+  order lookup (`{"order_id":"ord_1002"}` → the real seeded order row).
+- **Cross-run content-addressing, proven live, not assumed**: ran the
+  identical scenario a second time as a separate run id. The tool call's
+  input and output blob hashes were byte-identical to the first run's -
+  real deduplication across runs, not just within one. Counted the
+  actual objects in the bucket afterward: 3 runs' worth of steps (10
+  total) attempted 20 blob writes; only 16 distinct blobs exist in
+  storage. See docs/BENCHMARKS.md for the exact numbers.

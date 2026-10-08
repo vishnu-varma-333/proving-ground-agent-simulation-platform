@@ -905,6 +905,7 @@ source = { editable = "agents/reference_agent" }
 dependencies = [
     { name = "google-genai" },
     { name = "mcp" },
+    { name = "pg-sdk" },
     { name = "python-dotenv" },
 ]
 
@@ -912,6 +913,7 @@ dependencies = [
 requires-dist = [
     { name = "google-genai", specifier = ">=0.3" },
     { name = "mcp", specifier = ">=1.2" },
+    { name = "pg-sdk", editable = "sdk/pg_sdk" },
     { name = "python-dotenv", specifier = ">=1.0" },
 ]
 

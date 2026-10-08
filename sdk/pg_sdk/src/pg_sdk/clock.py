@@ -6,7 +6,7 @@ exact same timestamps the original run saw."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pg_sdk.recorder import Recorder
 
@@ -16,6 +16,6 @@ class RecordingClock:
         self._recorder = recorder
 
     def now(self) -> str:
-        value = datetime.now(timezone.utc).isoformat()
+        value = datetime.now(UTC).isoformat()
         self._recorder.record_clock_read(value)
         return value

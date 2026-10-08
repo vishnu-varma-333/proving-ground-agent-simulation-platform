@@ -136,3 +136,39 @@ or evaluation judges - unchanged from Milestone 1's note. Added to that
 list now: real per-call *cost* in dollars (needs the actual pricing page
 cross-referenced with real token counts, not done yet) and judge-model
 latency/accuracy (Milestone 8).
+
+---
+
+## Milestone 3: SDK and recording
+
+### Content-addressed dedup, measured directly from real storage
+
+**What:** Count of actual objects under `blobs/` in the SeaweedFS bucket
+after a mix of runs, versus the number of blob-write calls those runs
+made, read with `list_objects_v2` independent of the recorder that wrote
+them.
+
+**How measured:** `scripts/smoke_test_tape.py` (1 run, 2 steps) plus two
+back-to-back `reference_agent --record` invocations of the identical
+scenario (4 steps each), all against the same local SeaweedFS bucket,
+then a direct `boto3.list_objects_v2(Prefix="blobs/")`.
+
+| Metric | Count |
+| --- | --- |
+| Total steps recorded (2 + 4 + 4) | 10 |
+| Blob-write calls made (2 per step: request + response) | 20 |
+| Distinct blobs actually present in storage | **16** |
+| Confirmed-identical pair, cross-run | the second run's `get_order` tool-call input AND output hashes exactly matched the first run's |
+
+4 of the 20 write attempts hit an existing hash and were skipped - a 20%
+dedup rate on this small, repetitive sample. Not a claim about dedup
+rate at scale (Milestone 6's real throughput numbers will tell that
+story with thousands of runs); this is the mechanism proven to actually
+work against real storage, with the real numbers from doing it.
+
+### What's deliberately not benchmarked yet
+
+Carried over from Milestones 1-2, plus: replay fidelity (Milestone 4 -
+nothing replays a tape yet, so there's nothing to measure), and any
+cache *hit-rate-driven cost savings* (the spec's own "cache savings"
+metric needs the scheduler actually re-running suites, Milestone 6+).

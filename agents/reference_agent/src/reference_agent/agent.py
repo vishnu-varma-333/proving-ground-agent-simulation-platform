@@ -3,10 +3,12 @@ orders, check payments, issue refunds, and send confirmation emails by
 calling the three mock services' MCP tools through Gemini function
 calling.
 
-Nothing here talks to the simulation platform - that's Milestone 3's SDK,
-which will sit between an agent like this one and its model/tool calls to
-record and replay them. This agent just needs to work, standalone, as the
-realistic system under test everything else will run against.
+Recording (Milestone 3) is opt-in via an optional pg_sdk.Recorder passed
+to the constructor: with none, this is exactly the Milestone 2 agent with
+no platform dependency at all. With one, every model call, tool call and
+clock read is captured to a tape. Converting Gemini's own types to and
+from the plain dicts pg_sdk.Recorder expects happens here, not in the
+SDK - the SDK doesn't know or care what model this agent uses.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
+from pg_sdk import Recorder, RecordingClock
 
 from reference_agent.mcp_tools import MockServiceToolbox
 
@@ -107,10 +110,13 @@ class ReferenceAgent:
         toolbox: MockServiceToolbox,
         model: str | None = None,
         api_keys: list[str] | None = None,
+        recorder: Recorder | None = None,
     ) -> None:
         """`model=None` (the default) rotates across MODEL_CANDIDATES on
         quota exhaustion; passing an explicit model pins to just that one
-        (used by tests that don't care about model rotation)."""
+        (used by tests that don't care about model rotation). `recorder`
+        is None by default (plain Milestone 2 behavior, no platform
+        dependency); pass a pg_sdk.Recorder to capture a tape."""
         self._toolbox = toolbox
         self._models = [model] if model is not None else list(MODEL_CANDIDATES)
         self._model_index = 0
@@ -121,6 +127,8 @@ class ReferenceAgent:
         self._client = self._make_client(self._api_keys[0])
         self._tool = types.Tool(function_declarations=toolbox.function_declarations)
         self._contents: list[types.Content] = []
+        self._recorder = recorder
+        self._clock = RecordingClock(recorder) if recorder is not None else None
 
     @property
     def _model(self) -> str:
@@ -160,6 +168,9 @@ class ReferenceAgent:
         return False
 
     async def respond(self, user_message: str) -> str:
+        if self._clock is not None:
+            await asyncio.to_thread(self._clock.now)
+
         self._contents.append(
             types.Content(role="user", parts=[types.Part.from_text(text=user_message)])
         )
@@ -176,7 +187,12 @@ class ReferenceAgent:
 
             response_parts = []
             for call in calls:
-                result = await self._toolbox.call(call.name, dict(call.args or {}))
+                args = dict(call.args or {})
+                result = await self._toolbox.call(call.name, args)
+                if self._recorder is not None:
+                    await asyncio.to_thread(
+                        self._recorder.record_tool_call, call.name, args, result
+                    )
                 response_parts.append(
                     types.Part.from_function_response(name=call.name, response=result)
                 )
@@ -185,7 +201,7 @@ class ReferenceAgent:
         raise RuntimeError(f"agent did not produce a final answer within {MAX_TOOL_ROUNDS} tool rounds")
 
     def _call_model(self) -> types.GenerateContentResponse:
-        return self._client.models.generate_content(
+        response = self._client.models.generate_content(
             model=self._model,
             contents=self._contents,
             config=types.GenerateContentConfig(
@@ -193,6 +209,17 @@ class ReferenceAgent:
                 tools=[self._tool],
             ),
         )
+        if self._recorder is not None:
+            request_dict = {
+                "model": self._model,
+                "system_instruction": SYSTEM_INSTRUCTION,
+                "contents": [
+                    c.model_dump(mode="json", exclude_none=True) for c in self._contents
+                ],
+            }
+            response_dict = response.model_dump(mode="json", exclude_none=True)
+            self._recorder.record_model_call(self._model, request_dict, response_dict)
+        return response
 
     async def _generate_with_retry(self) -> types.GenerateContentResponse:
         """The Gemini API genuinely returns transient 503s under load and

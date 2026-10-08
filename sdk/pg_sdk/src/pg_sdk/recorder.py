@@ -15,7 +15,7 @@ needing to know what model or tools that agent uses.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pg_sdk.hashing import hash_json
@@ -35,7 +35,7 @@ class StepRecord:
 
 
 def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 @dataclass

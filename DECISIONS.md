@@ -450,3 +450,102 @@ tool-calling behavior in testing.
     with a regex scan (`^GEMINI_API_KEY_?(\d*)$`) over all of
     `os.environ`, sorted by suffix, accepting any numbering gaps or
     spelling.
+
+---
+
+## Milestone 3: SDK and recording
+
+## 11. Tape storage: content-addressed blobs + a per-run manifest, not one append-only log
+
+**Options considered:** One append-only JSONL file per run (simple,
+single object); a full event-sourced log in a database; content-addressed
+blobs (keyed by `sha256` of their own bytes) plus a small per-run
+manifest that lists, in order, which blob hashes that run touched.
+
+**Chosen:** The latter - `blobs/sha256/<first-2-chars>/<hash>.json` for
+every distinct request/response, `runs/<run_id>/steps/<seq>.json` for
+each step's metadata (which blobs it references, in what order), and
+`runs/<run_id>/manifest.json` summarizing the whole run.
+
+**Why:** S3 has no real append operation - "append-only JSONL in one
+object" means read-modify-write-the-whole-object on every single step,
+which gets slower and more collision-prone as a run grows. Separate
+per-step objects avoid that entirely. Content-addressing the
+request/response blobs specifically (not the step metadata, which is
+unique per run by definition) is what makes the spec's own "identical
+model requests served from a cache" goal (Milestone 3's model-call
+caching feature) and Milestone 4's replay both fall out of the same
+design for free: a cache lookup and a replay fetch are the same
+operation - "has this hash been seen before."
+
+**Cost:** More S3 objects than one-file-per-run would produce (confirmed
+live: a single 4-step conversation writes 9 objects - 1 manifest, 4 step
+records, 4 blobs after dedup). Not a real cost yet at this scale; worth
+revisiting if Milestone 6's throughput numbers show PUT-request volume
+becoming the bottleneck rather than model-call latency.
+
+## 12. The SDK is provider-agnostic; the agent does the translation
+
+**Options considered:** Have `pg_sdk.Recorder` understand
+`google.genai.types.Content`/`GenerateContentResponse` directly (less
+code at the call site); keep the SDK's public API to plain JSON-
+compatible dicts and make each agent integration responsible for
+converting its own provider's objects to and from that shape.
+
+**Chosen:** Plain dicts. `ReferenceAgent._call_model` calls
+`.model_dump(mode="json", exclude_none=True)` on Gemini's own types
+before handing anything to the recorder.
+
+**Why:** The spec's own framing is "a Python SDK that any agent plugs
+into" - a future agent built on Claude, OpenAI, or a local model should
+need the same `Recorder.record_model_call(model, request_dict,
+response_dict)` call, not a different recorder per provider. Coupling
+the SDK to one provider's SDK types would make that false the moment a
+second agent with a different model shows up. The cost of this choice is
+paid once, by each integration, not by the SDK.
+
+**Cost:** Each new agent integration has to write its own
+object-to-dict conversion. For `reference_agent` this was one line
+(`.model_dump(...)`) because `google-genai`'s types are already pydantic
+models with JSON-mode dumping built in; a provider without that
+convenience would cost more at the integration site specifically.
+
+## 13. Recording is opt-in, not automatic
+
+**Options considered:** Always construct a `Recorder` and record every
+run unconditionally (matches "every simulation produces a tape" as the
+eventual platform default); make it an explicit opt-in
+(`ReferenceAgent(recorder=None)` by default, `--record` CLI flag to turn
+it on).
+
+**Chosen:** Opt-in, `recorder: Recorder | None = None`.
+
+**Why:** Milestone 2's agent has zero platform dependency - it doesn't
+need a cluster running to answer a question. Forcing every invocation to
+also stand up an S3 connection would break that, and would make this
+milestone's own integration test (`agents/reference_agent/tests/`)
+start needing network access it doesn't actually exercise. Once the
+scheduler exists (Milestone 6) and is the thing launching simulations,
+*it* will always pass a recorder - this flag is a Milestone 1-3
+development convenience, not the platform's final answer to "is this run
+recorded."
+
+**Cost:** None found - `if self._recorder is not None` at three call
+sites is the entire cost, and every one of them was already an `await
+asyncio.to_thread(...)` or a plain sync call, so adding the conditional
+recording call alongside it was a one-line change each.
+
+---
+
+## Real bugs found while building Milestone 3
+
+None. Worth stating plainly rather than silently - the live integration
+(reference agent → recorder → real SeaweedFS, verified by reading
+blobs/manifests back independently of the code that wrote them) worked
+on the first real run. The absence of a bug here is itself informative:
+Milestones 1 and 2 had already forced the registry-mirror, bucket-race,
+ClickHouse-auth and MCP-API-version issues to the surface, so this
+milestone's actual new surface area (content hashing, S3 object layout,
+the dict-conversion boundary) was comparatively small and already
+exercised by 10 unit tests against a fake store before ever touching
+real storage.
