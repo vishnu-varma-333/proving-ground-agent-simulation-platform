@@ -1,0 +1,58 @@
+# One Job pod per simulation ("each worker pod runs one simulation in
+# isolation" - the spec's own architecture description), autoscaled by
+# KEDA against the queue-depth metric from metrics-exporter.yaml rather
+# than NATS JetStream directly (decision 22, DECISIONS.md).
+#
+# worker-api-keys Secret is created imperatively from .env.local by
+# scripts/deploy_platform.sh - never committed.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: pg-worker
+  namespace: proving-ground
+spec:
+  jobTargetRef:
+    backoffLimit: 1
+    template:
+      spec:
+        restartPolicy: Never
+        containers:
+          - name: worker
+            image: localhost:5002/pg-worker:dev
+            args: ["--once", "--once-timeout", "20"]
+            envFrom:
+              - secretRef:
+                  name: worker-api-keys
+            env:
+              - name: PG_POSTGRES_DSN
+                value: "postgresql://proving_ground:proving-ground-local-dev@postgres:5432/proving_ground"
+              - name: PG_NATS_URL
+                value: "nats://nats:4222"
+              - name: PG_S3_ENDPOINT_URL
+                value: "http://object-storage:8333"
+            resources:
+              requests:
+                cpu: 100m
+                memory: 256Mi
+              limits:
+                cpu: 500m
+                memory: 512Mi
+  pollingInterval: 5
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  maxReplicaCount: 4
+  minReplicaCount: 0
+  scalingStrategy:
+    strategy: default
+  triggers:
+    - type: prometheus
+      metadata:
+        # Must be fully-qualified: the KEDA operator runs in keda-system,
+        # not proving-ground, so a bare "prometheus" service name doesn't
+        # resolve for it even though it resolves fine for pods inside
+        # proving-ground itself (confirmed live: KEDA's own operator logs
+        # showed "lookup prometheus ... no such host" with the bare name).
+        serverAddress: http://prometheus.proving-ground.svc.cluster.local:9090
+        metricName: pg_pending_simulations
+        query: pg_pending_simulations
+        threshold: "1"

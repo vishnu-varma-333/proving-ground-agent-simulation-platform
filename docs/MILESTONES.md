@@ -13,7 +13,7 @@ as a teaching curriculum later.
 - [x] **4. Deterministic replay** — Replay from tape; determinism test suite
       passing.
 - [x] **5. Virtual time** — Simulated clock driving timers and waits.
-- [ ] **6. Distributed engine** — Scheduler, NATS queue, worker leases,
+- [x] **6. Distributed engine** — Scheduler, NATS queue, worker leases,
       retries, Kubernetes Jobs, KEDA autoscaling. Kill tests.
 - [ ] **7. Snapshots and faults** — Environment forking and the
       fault-injection proxy.
@@ -388,19 +388,16 @@ a failure.
 
 ---
 
-## Milestone 6: Distributed engine (in progress)
+## Milestone 6: Distributed engine
 
-**Status:** In progress - scheduler/worker/queue mechanics fully built
-and live-verified (including a real kill test and a real fairness
-test); Kubernetes Job + KEDA autoscaling packaging not yet attempted.
-**Started:** 2026-10-08.
+**Status:** Done, live-verified. **Started / finished:** 2026-10-08.
 
 **Goal.** Turn the single-agent demo into an actual distributed system:
 a scheduler that turns a suite into queued simulation jobs, a worker
 fleet that pulls them with lease/retry semantics (a crashed worker's job
 is never lost, never double-counted), fair scheduling so one large suite
-can't starve a smaller one, and (still pending) Kubernetes Jobs
-autoscaled by KEDA based on queue depth.
+can't starve a smaller one, and Kubernetes Jobs autoscaled by KEDA based
+on queue depth.
 
 **What got built so far:**
 - **Postgres data model** (`sdk/pg_sdk/src/pg_sdk/schema.sql` +
@@ -461,19 +458,59 @@ autoscaled by KEDA based on queue depth.
   small, big, big, big, big - the small suite's two jobs landed in
   positions 2 and 4 of 8, not stuck behind all six of the big suite's.
 
-**Still pending (not dropped - explicitly not yet attempted):**
-- Kubernetes Job manifests for the worker, parameterized for in-cluster
-  service DNS names (not the host-mapped ports used for this round of
-  local testing).
-- A container image for the worker and a way to get it into the kind
-  cluster - `kind load docker-image` is already known broken on this
-  host (Milestone 1's registry-mirror decision); will need a second,
-  writable local registry alongside the existing pull-through mirror.
-- KEDA installed into the cluster and a `ScaledJob` watching NATS
-  JetStream queue depth.
+**Kubernetes Jobs + KEDA autoscaling (completed after the checkpoint above):**
+- `docker/worker.Dockerfile` packages the whole workspace (the worker
+  spawns the mock services as subprocesses, so they have to be
+  installed in the same venv) - built and pushed to a second, writable
+  local registry (`localhost:5002`, decision 23) alongside Milestone 1's
+  pull-through Docker Hub mirror, which only proxies docker.io and isn't
+  a place to push a new image name.
+- KEDA installed via Helm into `keda-system`.
+- `infra/k8s/local/platform/metrics-exporter.yaml`: a small Deployment
+  exposing `pg_pending_simulations`/`pg_running_simulations` (queried
+  from Postgres, the real source of truth for backlog) for Prometheus
+  to scrape - KEDA scales against this metric rather than NATS
+  JetStream directly, because decision 20's one-consumer-per-run fair-
+  dispatch design means there's no single static consumer name that
+  reflects total backlog across every active run (decision 22).
+- `infra/k8s/local/platform/worker-scaledjob.yaml`: a KEDA `ScaledJob`
+  running the worker image with `--once` - one Job pod per simulation,
+  exactly the spec's own "each worker pod runs one simulation in
+  isolation."
+- `scripts/deploy_platform.sh`: creates the `worker-api-keys` Secret
+  from `.env.local` (never committed) and applies both manifests.
+
+**Real bug found and fixed in this stretch** (full detail in
+DECISIONS.md): the ScaledJob's Prometheus trigger used a bare
+`prometheus` service name, which resolves fine for anything inside the
+`proving-ground` namespace but not for KEDA's own operator, which runs
+in `keda-system` - cross-namespace service names need to be fully
+qualified. The operator's own logs named the exact DNS failure.
+
+**Live verification performed (Kubernetes Jobs + KEDA, real numbers):**
+- Confirmed the custom image is pullable from *inside* the kind cluster
+  via the new local registry: a test pod pulled
+  `localhost:5002/pg-worker:dev` in 2.048s.
+- **Full autoscaling run**: submitted a 4-scenario suite. KEDA scaled
+  the ScaledJob from 0 to 4 replicas, 4 separate Job pods each pulled
+  and processed exactly one simulation, all 4 completed successfully
+  (verified in Postgres, not just `kubectl get jobs`), and KEDA scaled
+  back to 0 once the queue drained.
+- **Clean, isolated timing measurement** (a second single-job run,
+  after the DNS bug was fixed, to avoid a number contaminated by manual
+  debugging time): submission to KEDA creating the pod - **11.1s**; job
+  execution - 17s (one lookup, consistent with Milestone 2's per-call
+  timing); scale-down to `ACTIVE: False` - within the next 2s polling
+  check after completion. Full numbers in docs/BENCHMARKS.md.
+
+**Still pending, deliberately left for later:**
 - Priorities (the data model and dispatcher already support a priority
-  weight; not yet exercised live with two runs at genuinely different
-  priorities, only equal-priority fairness so far).
+  weight; only equal-priority fairness has been exercised live so far,
+  not two runs at genuinely different priorities).
 - Cleaning up a finished run's durable JetStream consumer
   (`delete_run_consumer` exists but isn't called from anywhere yet -
   decision 20's accepted minor leak).
+- Throughput at higher worker counts (`maxReplicaCount` was 4 for this
+  test, matching the exact queue depth tested; the spec's own
+  1/4/16/64-worker throughput table needs a real suite larger than this
+  milestone's verification needed).

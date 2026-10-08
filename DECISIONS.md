@@ -732,7 +732,7 @@ hitting the `TypeError` and working backward.
 
 ---
 
-## Milestone 6: Distributed engine (in progress)
+## Milestone 6: Distributed engine
 
 ## 19. Scheduler is a CLI, not a persistent service
 
@@ -870,3 +870,101 @@ worker and KEDA ScaledJob autoscaling (the "Kubernetes Jobs, KEDA
 autoscaling" piece of this milestone's own title) - not yet attempted.
 Everything verified above ran as plain host processes against the
 cluster's exposed services, not yet packaged to run inside Kubernetes.
+
+## 22. KEDA scales on a Prometheus metric, not NATS JetStream directly
+
+**Options considered:** Point KEDA's native `nats-jetstream` scaler
+trigger at a single consumer's lag; export queue depth from Postgres
+(the actual source of truth for "how much work is pending") as a
+Prometheus metric and use KEDA's `prometheus` scaler instead.
+
+**Chosen:** The Prometheus metric
+(`platform/worker/src/pg_worker/metrics_exporter.py`, exposing
+`pg_pending_simulations`/`pg_running_simulations`).
+
+**Why:** KEDA's `nats-jetstream` trigger needs one statically-named
+consumer per trigger - but decision 20's fair-dispatch design creates
+one durable consumer *per run*, dynamically, as runs come and go. There
+is no single consumer name that reflects total backlog across every
+active run; KEDA has no way to watch "however many consumers happen to
+exist right now." Exporting the real backlog count from Postgres
+(which already is this project's source of truth for simulation state)
+sidesteps the mismatch entirely, and directly satisfies a metric the
+spec's own production-readiness section names outright: "queue depth."
+
+**Cost:** One more moving part (the exporter) and one more scrape
+target - cheap, and it reuses Milestone 1's existing Prometheus
+auto-discovery (any pod annotated `prometheus.io/scrape: "true"` gets
+scraped automatically; no new Prometheus config needed).
+
+## 23. A second, writable local image registry alongside the pull-through mirror
+
+**Options considered:** Reuse `kind-registry-mirror` (Milestone 1's
+pull-through cache for Docker Hub) for pushing the worker's own image
+too; stand up a second, separate `registry:2` container with no proxy
+config, on its own port, with its own containerd mirror entry.
+
+**Chosen:** The second registry (`kind-registry-local`, port 5002).
+
+**Why:** `kind-registry-mirror` is configured with
+`REGISTRY_PROXY_REMOTEURL` specifically for docker.io - it's a read-
+through cache for a known upstream, not a place to push an arbitrary
+new image name like `pg-worker`. A plain registry with no proxy config
+accepts pushes normally; this is kind's own documented "local registry"
+pattern (kind.sigs.k8s.io/docs/user/local-registry), just applied a
+second time for a different purpose than the first registry serves.
+
+**Cost:** A second long-lived container or `up.sh` to manage, mirroring
+the first one's lifecycle (`--restart=always`, connected to the `kind`
+docker network, left running across `down.sh` so its cache survives
+cluster teardown - same reasoning as decision in Milestone 1).
+
+---
+
+## Real bugs found while building Milestone 6 (continued)
+
+20. **KEDA's Prometheus trigger couldn't resolve a bare service name.**
+    `serverAddress: http://prometheus:9090` worked fine for anything
+    running *inside* the `proving-ground` namespace, but KEDA's own
+    operator runs in `keda-system` - a bare service name only resolves
+    within the querying pod's own namespace by default. The operator's
+    own logs named the exact failure: `dial tcp: lookup prometheus on
+    10.96.0.10:53: no such host`. Fixed with the fully-qualified name
+    (`prometheus.proving-ground.svc.cluster.local`). A bug that was
+    invisible from inside `proving-ground` itself - every other service
+    in this project talks to Prometheus with the bare name and works
+    fine; only a cross-namespace caller hits it.
+
+---
+
+## Live verification: Kubernetes Jobs + KEDA autoscaling (real numbers)
+
+- **Image build and push**: `docker/worker.Dockerfile` packages the
+  *whole* workspace (not just `pg_worker`'s own code), since
+  `MockServiceToolbox` launches the three mock services as subprocesses
+  - they have to be installed in the same venv the worker runs in.
+  Built and pushed to `localhost:5002/pg-worker:dev`; pulled from
+  *inside* the kind cluster via the containerd mirror in 2.048s
+  (`kubectl describe pod` timing a real test pod's image pull) -
+  confirming decision 23's registry actually works end to end, not just
+  that `docker push` succeeded.
+- **KEDA installed via Helm** (`kedacore/keda` into `keda-system`) -
+  with a version-mismatch warning (KEDA 2.21 expects Kubernetes 1.34+;
+  this cluster runs kind's 1.31) that turned out not to matter for
+  anything exercised here.
+- **Full autoscaling test**: submitted a 4-scenario suite. KEDA scaled
+  the `pg-worker` ScaledJob from 0 to 4 replicas - `ACTIVE` flipped
+  `True`, 4 separate Job pods appeared, each pulling and processing
+  exactly one simulation via `--once`. All 4 completed successfully
+  (`attempt=1`, real Gemini replies, correct order data), confirmed
+  independently in Postgres, not just from `kubectl get jobs` showing
+  `Complete`. Scaled back to 0 (`ACTIVE: False`) once the queue drained.
+- **Clean timing measurement** (a second, isolated single-job run, after
+  the DNS bug was already fixed - the first multi-job test's timing
+  would have been contaminated by the manual debugging pause): 11.1s
+  from the scheduler's Postgres write to KEDA creating the Job pod
+  (`runs.started_at` vs. the Job's `creationTimestamp`); 17s job
+  execution time (one order-status lookup, matching the single-call
+  timing from Milestone 2's benchmarks); scaled back to `ACTIVE: False`
+  within the next 2s polling check after the job completed. See
+  docs/BENCHMARKS.md for the full numbers.

@@ -39,6 +39,26 @@ if [ "$("$DOCKER_BIN" inspect -f '{{.State.Running}}' "$MIRROR_NAME" 2>/dev/null
   fi
 fi
 
+# A second, separate registry for images THIS project builds (the worker
+# container, Milestone 6+) - the mirror above only proxies docker.io, it's
+# not a place to push a new image name. Plain `registry:2`, no proxy
+# config, so `docker push localhost:5002/<name>` just works from the host.
+LOCAL_REGISTRY_NAME="kind-registry-local"
+LOCAL_REGISTRY_PORT="5002"
+
+if [ "$("$DOCKER_BIN" inspect -f '{{.State.Running}}' "$LOCAL_REGISTRY_NAME" 2>/dev/null || true)" != "true" ]; then
+  if "$DOCKER_BIN" ps -aq -f "name=^${LOCAL_REGISTRY_NAME}$" | grep -q .; then
+    echo "Starting existing local image registry container..."
+    "$DOCKER_BIN" start "$LOCAL_REGISTRY_NAME" >/dev/null
+  else
+    echo "Creating local image registry for project-built images..."
+    "$DOCKER_BIN" run -d --restart=always \
+      -p "127.0.0.1:${LOCAL_REGISTRY_PORT}:5000" \
+      --name "$LOCAL_REGISTRY_NAME" \
+      registry:2 >/dev/null
+  fi
+fi
+
 if "$KIND_BIN" get clusters | grep -qx "$CLUSTER_NAME"; then
   echo "kind cluster '$CLUSTER_NAME' already exists, reusing it."
 else
@@ -49,6 +69,11 @@ fi
 if ! "$DOCKER_BIN" network inspect kind --format '{{range .Containers}}{{.Name}} {{end}}' | grep -qw "$MIRROR_NAME"; then
   echo "Connecting registry mirror to the kind network..."
   "$DOCKER_BIN" network connect kind "$MIRROR_NAME"
+fi
+
+if ! "$DOCKER_BIN" network inspect kind --format '{{range .Containers}}{{.Name}} {{end}}' | grep -qw "$LOCAL_REGISTRY_NAME"; then
+  echo "Connecting local image registry to the kind network..."
+  "$DOCKER_BIN" network connect kind "$LOCAL_REGISTRY_NAME"
 fi
 
 "$KUBECTL_BIN" config use-context "kind-$CLUSTER_NAME"
@@ -84,6 +109,7 @@ Proving Ground local stack is up. Host ports:
   Object storage filer http://localhost:29002
   Prometheus          http://localhost:29090
   Grafana             http://localhost:23000  (admin / see infra/k8s/local/observability/grafana.yaml)
+  Local image registry localhost:5002 (docker push localhost:5002/<name>:<tag> for cluster-visible images)
 
 Run scripts/health-check.sh to verify every service is reachable and answering.
 EOF

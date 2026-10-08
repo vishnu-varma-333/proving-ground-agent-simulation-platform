@@ -9,10 +9,17 @@ name: proving-ground
 # documented workaround and also fixes the real problem (repeat bring-ups
 # re-pulling every image from Docker Hub) more durably than image loading
 # would have.
+# A second, separate registry (localhost:5002) for OUR OWN built images
+# (the worker container, Milestone 6) - kind-registry-mirror above is a
+# read-through PROXY for docker.io specifically and isn't a place to push
+# arbitrary new image names; a plain writable registry is kind's own
+# documented pattern for this (kind.sigs.k8s.io/docs/user/local-registry).
 containerdConfigPatches:
   - |-
     [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
       endpoint = ["http://kind-registry-mirror:5000"]
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5002"]
+      endpoint = ["http://kind-registry-local:5000"]
 nodes:
   - role: control-plane
     extraPortMappings:

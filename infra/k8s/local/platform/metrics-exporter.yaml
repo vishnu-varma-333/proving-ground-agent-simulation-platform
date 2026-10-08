@@ -1,0 +1,54 @@
+# Exposes queue-depth metrics (pg_pending_simulations, pg_running_simulations)
+# for Prometheus to scrape and KEDA to query - see DECISIONS.md decision 22
+# for why this exists instead of pointing KEDA directly at NATS JetStream.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-exporter
+  namespace: proving-ground
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: metrics-exporter
+  template:
+    metadata:
+      labels:
+        app: metrics-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9108"
+    spec:
+      containers:
+        - name: metrics-exporter
+          image: localhost:5002/pg-worker:dev
+          command: ["python", "-m", "pg_worker.metrics_exporter"]
+          env:
+            - name: PG_POSTGRES_DSN
+              value: "postgresql://proving_ground:proving-ground-local-dev@postgres:5432/proving_ground"
+          ports:
+            - containerPort: 9108
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9108
+            initialDelaySeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: metrics-exporter
+  namespace: proving-ground
+spec:
+  selector:
+    app: metrics-exporter
+  ports:
+    - port: 9108
+      targetPort: 9108

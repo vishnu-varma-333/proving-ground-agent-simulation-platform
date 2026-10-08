@@ -253,7 +253,7 @@ before Milestone 6's distributed engine exists to generate that load.
 
 ---
 
-## Milestone 6: Distributed engine (in progress)
+## Milestone 6: Distributed engine
 
 ### Fault tolerance (the spec's own target metric, Milestone 1's table)
 
@@ -289,11 +289,50 @@ attempt at this measurement actually showed zero interleaving - caught
 and fixed a real rotation bug first; see DECISIONS.md bug 19. This
 number is from the run *after* that fix.)
 
+### KEDA autoscaling: real numbers from a real scaling event
+
+**What:** Time from a suite's submission to KEDA creating worker Job
+pods, pod execution time, and time to scale back to zero once the
+queue drains.
+
+**How measured:** Two separate submissions against the real local
+cluster (kind + KEDA installed via Helm + the worker image on a local
+registry). The first (4 scenarios) proved 0→4 scaling works at all; the
+second (1 scenario, submitted *after* the Prometheus-DNS bug below was
+already fixed) gives a clean, uncontaminated timing number - the first
+run's timing included a manual debugging pause and would have been
+misleading to report as "KEDA's latency."
+
+| Stage | Measured |
+| --- | --- |
+| Submission (Postgres `runs.started_at`) → KEDA creates the Job pod | **11.1s** |
+| Job pod execution (one order-status lookup) | 17s |
+| Job completion → ScaledJob `Active: False` | ≤ 2s (first poll after completion already showed it) |
+
+The 11.1s scale-up is the sum of the metrics exporter's 5s Postgres
+poll interval, Prometheus's own scrape interval, and KEDA's 5s
+`pollingInterval` on the trigger - not a single mechanism's latency,
+but the real end-to-end number a submitter actually experiences.
+
+**Multi-pod run:** a 4-scenario suite scaled the ScaledJob from 0 to 4
+replicas (`maxReplicaCount: 4`, matching the exact queue depth), all 4
+Job pods ran concurrently and completed successfully (`attempt=1` each,
+verified in Postgres), then scaled back to 0.
+
+### Fault tolerance under KEDA-managed Jobs
+
+Not yet re-tested: the kill test above was run against a manually-
+started worker process, not a KEDA-created Job pod. The mechanism
+(JetStream `ack_wait` + redelivery) is identical either way since it
+lives in NATS, not in how the worker process was started - but it
+hasn't been *proven* under a real `kubectl delete pod` against a KEDA
+Job specifically. Worth doing before relying on this number in a
+higher-stakes context.
+
 ### What's deliberately not benchmarked yet
 
-Carried over from Milestones 1-5, plus: throughput at any real worker
-count (everything above ran one worker at a time - the spec's own
-"simulations per minute at 1/4/16/64 workers" table needs the K8s Job +
-KEDA packaging that's still pending for this milestone), and weighted
-(unequal) priority scheduling - only equal-priority fairness has been
-measured so far.
+Carried over from Milestones 1-5, plus: throughput at any worker count
+beyond 4 (the spec's own "simulations per minute at 1/4/16/64 workers"
+table needs a real suite sized for that, not this milestone's
+verification-sized one), and weighted (unequal) priority scheduling -
+only equal-priority fairness has been measured so far.
