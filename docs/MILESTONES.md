@@ -10,7 +10,7 @@ as a teaching curriculum later.
       plus orders, payments and email mock services with SQLite state.
 - [x] **3. SDK and recording** — Python SDK intercepting model calls, tool
       calls and clock reads; tapes written to S3(-compatible storage).
-- [ ] **4. Deterministic replay** — Replay from tape; determinism test suite
+- [x] **4. Deterministic replay** — Replay from tape; determinism test suite
       passing.
 - [ ] **5. Virtual time** — Simulated clock driving timers and waits.
 - [ ] **6. Distributed engine** — Scheduler, NATS queue, worker leases,
@@ -268,3 +268,67 @@ covered by unit tests before touching real storage.
   actual objects in the bucket afterward: 3 runs' worth of steps (10
   total) attempted 20 blob writes; only 16 distinct blobs exist in
   storage. See docs/BENCHMARKS.md for the exact numbers.
+
+---
+
+## Milestone 4: Deterministic replay
+
+**Status:** Done, live-verified. **Started / finished:** 2026-10-08.
+
+**Goal.** The tape from Milestone 3 actually gets used: feed a recorded
+run's model/tool/clock answers back to the agent instead of making real
+calls, so a failure reproduces exactly without the live API or mock
+services. The real bar isn't "replay prints the same text" - it's that
+replay recomputes each step's request from scratch and that recomputed
+request hashes identically to what was recorded, which is what actually
+proves the recording/replay plumbing is sound (the LLM itself isn't
+expected to be deterministic; the orchestration around it is).
+
+**What got built:**
+- `pg_sdk.Player` (`sdk/pg_sdk/src/pg_sdk/player.py`): loads a run's
+  manifest, and for each `replay_model_call` / `replay_tool_call` /
+  `replay_clock_read`, recomputes the request's hash the same way the
+  recorder did and compares it against the tape (decision 14) before
+  serving the recorded output. Three distinct, clearly-named failure
+  modes: `TapeExhausted` (asked for more steps than were recorded),
+  `TapeOrderMismatch` (asked for a different kind/name of step than the
+  tape has next), `ReplayMismatch` (same kind/name, different content -
+  the actual determinism violation).
+- `ReferenceAgent` takes an optional `player` (mutually exclusive with
+  `recorder`): when set, `_call_model` never touches the real Gemini
+  client, the tool-calling loop never touches the real MCP toolbox, and
+  the clock read never touches real time - every one is served from the
+  tape instead. No API key or MCP servers are required in this mode at
+  all (proven live, not just structurally).
+- CLI gained `--replay RUN_ID "message"` (the same message that produced
+  that run originally, since the tape records model/tool/clock outputs,
+  not the human's own input - that was never non-deterministic).
+- 6 new unit tests for `Player` (serves recorded outputs in order, tape
+  exhaustion, kind/name mismatch, a real determinism-violation case,
+  clock replay, and reading a tape with a fresh store object unrelated
+  to the original `Recorder` instance) - 35 total across the project,
+  all passing, `ruff check` clean.
+
+**Real bugs found:** none - the one place a mismatch could have hidden
+(the request-dict-building code diverging between record and replay) was
+designed around by construction (decision 15), not discovered as a
+failure afterward.
+
+**Live verification performed (not just unit tests):**
+- **Recorded a real refund** (order `ord_1004`), then **replayed it**
+  with the exact same message, with `GEMINI_API_KEY*` deliberately unset
+  and confirmed no mock-service processes were running beforehand: the
+  reply text matched exactly, and the CLI reported "all 10 recorded
+  steps consumed, no mismatch." Replay could not have made a live call -
+  there was no key for it to use.
+- **Confirmed replay never touched the real services**: refund row count
+  in `payments.db` was 1 before replay and still exactly 1 (same id)
+  after - replay produced the right answer without re-executing the
+  real refund logic at all.
+- **Deliberately broke replay** by feeding a different message
+  ("What's the weather today?") against the same run id. It failed
+  loudly and specifically: `pg_sdk.player.ReplayMismatch: determinism
+  violation at seq 1 (model/gemini-flash-lite-latest): recorded input
+  hash 936cc96de17e... but replay recomputed 1f701a8ca2bf...` - exactly
+  the negative-test proof a determinism checker needs: a real deviation
+  is caught, named, and located, not silently accepted.

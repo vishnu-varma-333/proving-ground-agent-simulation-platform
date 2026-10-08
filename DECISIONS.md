@@ -549,3 +549,83 @@ milestone's actual new surface area (content hashing, S3 object layout,
 the dict-conversion boundary) was comparatively small and already
 exercised by 10 unit tests against a fake store before ever touching
 real storage.
+
+---
+
+## Milestone 4: Deterministic replay
+
+## 14. Replay recomputes and re-checks every request, rather than just serving outputs in order
+
+**Options considered:** A "dumb" player that serves the next recorded
+output for whatever kind of call comes next, trusting the caller; a
+player that recomputes the request the same way the recorder hashed it
+originally and compares that hash against what was recorded, raising on
+any mismatch.
+
+**Chosen:** The latter (`pg_sdk.Player._next`, used by all three replay
+methods).
+
+**Why:** A dumb player can't actually catch anything - it would happily
+feed back step 3's answer even if the agent asked a subtly different
+question than it did during recording, silently producing a replay that
+looks successful but proves nothing. The spec's own requirement is a
+"determinism test suite" and "100% identical across 10,000 replays"
+(docs/BENCHMARKS.md's Milestone 1 target) - that's a claim about the
+*surrounding orchestration* being deterministic given the same
+model/tool/clock answers, which can only be verified by recomputing and
+comparing, not by trusting. This is also exactly the mechanism a
+negative test needs: deliberately replaying with a different message
+than was recorded must fail loudly, not succeed quietly.
+
+**Cost:** Replay's input to each step must be recomputed byte-identically
+to how it was built during recording (same dict shape, same JSON
+canonicalization) or a legitimate replay fails as a false-positive
+mismatch. In practice this means `_call_model`'s request-dict-building
+code must be shared (not duplicated) between the recording and replay
+paths - it already is, in `ReferenceAgent._call_model` (decision 15
+below covers the one real gap this created).
+
+## 15. Model/key rotation state isn't replayed - a known, accepted gap
+
+**Options considered:** Make `Player` also replay which (key, model)
+slot was active at each step, so a run that rotated mid-recording
+replays the same rotation; leave rotation as live-only behavior and
+accept that a recording containing a mid-run rotation won't replay
+cleanly.
+
+**Chosen:** Leave it live-only, documented as a known gap rather than
+fixed speculatively.
+
+**Why:** `ReferenceAgent._model` (used to build the request dict's
+`"model"` field) is computed from `self._model_index`, which only
+changes via `_rotate_slot()` - a path that exists purely to handle a
+quota-exhausted live API, and never executes during replay (no real API
+calls happen, so nothing ever raises the error that triggers rotation).
+If the ORIGINAL recording rotated mid-conversation (quota ran out
+partway through), replay's request dict for the later steps would name
+the wrong model and legitimately fail the hash check in decision 14 -
+correctly flagging that the two runs differ, just not for a reason
+anyone watching a replay would find useful. Building a parallel
+rotation-replay mechanism for a scenario this narrow (mid-single-
+conversation quota exhaustion, specifically on a free-tier key) isn't
+worth it before there's a real need; every live verification run this
+milestone used a recording where no rotation occurred, so the gap didn't
+block proving the actual replay mechanism works.
+
+**Cost:** A recorded run that rotated models or keys mid-conversation
+cannot currently be replayed past the rotation point. Worth revisiting
+if/when Milestone 6's scheduler starts recording real production
+traffic at volume, where quota exhaustion mid-run becomes likely rather
+than a free-tier edge case.
+
+---
+
+## Real bugs found while building Milestone 4
+
+None, again. The design decisions above (recompute-and-compare, not
+replaying rotation state) were made deliberately during the build, not
+discovered as failures afterward - the one place a real mismatch could
+have hidden (the request-dict-building code diverging between the
+record and replay code paths) was avoided by having `_call_model` build
+that dict once, before branching into either path, rather than once in
+each.

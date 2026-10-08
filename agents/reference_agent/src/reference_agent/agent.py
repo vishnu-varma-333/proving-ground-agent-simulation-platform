@@ -22,7 +22,7 @@ import httpx
 from google import genai
 from google.genai import errors as genai_errors
 from google.genai import types
-from pg_sdk import Recorder, RecordingClock
+from pg_sdk import Player, Recorder, RecordingClock
 
 from reference_agent.mcp_tools import MockServiceToolbox
 
@@ -111,24 +111,44 @@ class ReferenceAgent:
         model: str | None = None,
         api_keys: list[str] | None = None,
         recorder: Recorder | None = None,
+        player: Player | None = None,
     ) -> None:
         """`model=None` (the default) rotates across MODEL_CANDIDATES on
         quota exhaustion; passing an explicit model pins to just that one
         (used by tests that don't care about model rotation). `recorder`
         is None by default (plain Milestone 2 behavior, no platform
-        dependency); pass a pg_sdk.Recorder to capture a tape."""
+        dependency); pass a pg_sdk.Recorder to capture a tape.
+
+        `player` replays a previously recorded tape instead of making any
+        live call: no Gemini API key, no running MCP servers, and no
+        network at all are needed in this mode - every model call, tool
+        call and clock read is served from the tape (and checked against
+        it; see pg_sdk.Player). Mutually exclusive with `recorder` - a
+        run is either being recorded or replayed, never both."""
+        if recorder is not None and player is not None:
+            raise ValueError("pass recorder or player, not both")
         self._toolbox = toolbox
         self._models = [model] if model is not None else list(MODEL_CANDIDATES)
         self._model_index = 0
-        self._api_keys = api_keys if api_keys is not None else load_api_keys()
-        if not self._api_keys:
-            raise RuntimeError("no Gemini API key set (GEMINI_API_KEY)")
-        self._key_index = 0
-        self._client = self._make_client(self._api_keys[0])
-        self._tool = types.Tool(function_declarations=toolbox.function_declarations)
-        self._contents: list[types.Content] = []
+        self._player = player
         self._recorder = recorder
         self._clock = RecordingClock(recorder) if recorder is not None else None
+        self._contents: list[types.Content] = []
+
+        if player is None:
+            self._api_keys = api_keys if api_keys is not None else load_api_keys()
+            if not self._api_keys:
+                raise RuntimeError("no Gemini API key set (GEMINI_API_KEY)")
+            self._key_index = 0
+            self._client = self._make_client(self._api_keys[0])
+            self._tool = types.Tool(function_declarations=toolbox.function_declarations)
+        else:
+            # Replay touches none of this - no key, no client, no live
+            # tool schema (the toolbox itself never needs to be connected).
+            self._api_keys = []
+            self._key_index = 0
+            self._client = None
+            self._tool = None
 
     @property
     def _model(self) -> str:
@@ -168,7 +188,9 @@ class ReferenceAgent:
         return False
 
     async def respond(self, user_message: str) -> str:
-        if self._clock is not None:
+        if self._player is not None:
+            await asyncio.to_thread(self._player.replay_clock_read)
+        elif self._clock is not None:
             await asyncio.to_thread(self._clock.now)
 
         self._contents.append(
@@ -188,11 +210,16 @@ class ReferenceAgent:
             response_parts = []
             for call in calls:
                 args = dict(call.args or {})
-                result = await self._toolbox.call(call.name, args)
-                if self._recorder is not None:
-                    await asyncio.to_thread(
-                        self._recorder.record_tool_call, call.name, args, result
+                if self._player is not None:
+                    result = await asyncio.to_thread(
+                        self._player.replay_tool_call, call.name, args
                     )
+                else:
+                    result = await self._toolbox.call(call.name, args)
+                    if self._recorder is not None:
+                        await asyncio.to_thread(
+                            self._recorder.record_tool_call, call.name, args, result
+                        )
                 response_parts.append(
                     types.Part.from_function_response(name=call.name, response=result)
                 )
@@ -201,6 +228,19 @@ class ReferenceAgent:
         raise RuntimeError(f"agent did not produce a final answer within {MAX_TOOL_ROUNDS} tool rounds")
 
     def _call_model(self) -> types.GenerateContentResponse:
+        request_dict = {
+            "model": self._model,
+            "system_instruction": SYSTEM_INSTRUCTION,
+            "contents": [c.model_dump(mode="json", exclude_none=True) for c in self._contents],
+        }
+
+        if self._player is not None:
+            # No live call at all: the exact recorded response comes back,
+            # or pg_sdk.Player raises if this request doesn't match what
+            # was recorded for this step (a real determinism violation).
+            response_dict = self._player.replay_model_call(self._model, request_dict)
+            return types.GenerateContentResponse.model_validate(response_dict)
+
         response = self._client.models.generate_content(
             model=self._model,
             contents=self._contents,
@@ -210,13 +250,6 @@ class ReferenceAgent:
             ),
         )
         if self._recorder is not None:
-            request_dict = {
-                "model": self._model,
-                "system_instruction": SYSTEM_INSTRUCTION,
-                "contents": [
-                    c.model_dump(mode="json", exclude_none=True) for c in self._contents
-                ],
-            }
             response_dict = response.model_dump(mode="json", exclude_none=True)
             self._recorder.record_model_call(self._model, request_dict, response_dict)
         return response

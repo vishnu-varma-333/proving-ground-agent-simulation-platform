@@ -172,3 +172,40 @@ Carried over from Milestones 1-2, plus: replay fidelity (Milestone 4 -
 nothing replays a tape yet, so there's nothing to measure), and any
 cache *hit-rate-driven cost savings* (the spec's own "cache savings"
 metric needs the scheduler actually re-running suites, Milestone 6+).
+
+---
+
+## Milestone 4: Deterministic replay
+
+### Replay fidelity (the spec's own target metric, first real measurement)
+
+**What:** Whether a recorded run's final output, replayed with the same
+input, matches exactly - and whether every one of its steps' recomputed
+request hashes matches what was recorded (the real test; matching final
+text alone could hide a step-level divergence that happened to cancel
+out).
+
+**How measured:** One real recorded refund conversation (10 steps:
+clock, model, tool, model, tool, model, tool, model, tool, model),
+replayed once with the identical input, read back through `pg_sdk.Player`
+with no live API key present and no MCP server processes running.
+
+| Run | Result |
+| --- | --- |
+| Replay with identical input | All 10/10 steps matched; final reply text identical to the original run; zero live calls made (no key available to make one) |
+| Replay with a deliberately different input (negative test) | Failed at step 1 of 10 (the first model call) with a named, located `ReplayMismatch` - correctly caught, not silently wrong |
+
+This is **1 run** replayed, not the spec's "100% identical across 10,000
+replays" target (Milestone 1's benchmarks table) - that number needs
+volume this project doesn't have until Milestone 6's distributed engine
+can actually run thousands of simulations. What's measured here is that
+the mechanism itself is sound on a real run, which is the precondition
+for that number meaning anything later.
+
+### What's deliberately not benchmarked yet
+
+Carried over from Milestones 1-3. Replay *performance* (how much faster
+a replay is than the original live run, now that no network calls
+happen) wasn't measured this milestone - worth doing once there's a
+reason to care about replay speed specifically, e.g. Milestone 6's kill
+tests re-running failed simulations at volume.
