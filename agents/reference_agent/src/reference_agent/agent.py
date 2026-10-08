@@ -215,7 +215,16 @@ class ReferenceAgent:
                         self._player.replay_tool_call, call.name, args
                     )
                 else:
-                    result = await self._toolbox.call(call.name, args)
+                    try:
+                        result = await self._toolbox.call(call.name, args)
+                    except Exception as exc:  # noqa: BLE001 - any tool failure must become a result, not a crash
+                        # A tool call can genuinely fail now (Milestone 7's
+                        # fault injection: a simulated timeout/outage) - feed
+                        # the failure back to the model as a tool result
+                        # instead of crashing the whole conversation, so the
+                        # agent can react (retry, apologize, try another
+                        # path) the way a real agent would have to.
+                        result = {"error": f"{call.name} failed: {exc}"}
                     if self._recorder is not None:
                         await asyncio.to_thread(
                             self._recorder.record_tool_call, call.name, args, result

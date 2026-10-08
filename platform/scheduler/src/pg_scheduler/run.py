@@ -41,6 +41,7 @@ async def submit_suite(
             user_message=scenario.user_message,
             env_template_id=scenario.env_template,
             version=scenario.version,
+            faults=list(scenario.faults),
         )
 
     await store.upsert_suite(suite.id, suite.name, [s.id for s in suite.scenarios])

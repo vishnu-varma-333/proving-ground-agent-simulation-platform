@@ -15,7 +15,7 @@ as a teaching curriculum later.
 - [x] **5. Virtual time** — Simulated clock driving timers and waits.
 - [x] **6. Distributed engine** — Scheduler, NATS queue, worker leases,
       retries, Kubernetes Jobs, KEDA autoscaling. Kill tests.
-- [ ] **7. Snapshots and faults** — Environment forking and the
+- [x] **7. Snapshots and faults** — Environment forking and the
       fault-injection proxy.
 - [ ] **8. Evaluation** — State checks, simulated users, calibrated judges.
 - [ ] **9. Console** — Run explorer, replay viewer, version comparison.
@@ -514,3 +514,57 @@ qualified. The operator's own logs named the exact DNS failure.
   test, matching the exact queue depth tested; the spec's own
   1/4/16/64-worker throughput table needs a real suite larger than this
   milestone's verification needed).
+
+---
+
+## Milestone 7: Snapshots and faults
+
+**Status:** Done, live-verified. **Started / finished:** 2026-10-08.
+
+**Goal.** Two pieces named in this milestone's own title: real
+environment forking (replacing Milestone 6's reseed-from-scratch stand-in
+with cheap file-copy snapshots of a template) and fault injection (a
+layer that can add latency, errors, timeouts or partial responses to a
+mock tool call, per scenario).
+
+**What got built:**
+- `pg_sdk.fork_environment` / `pg_sdk.environment`: plain file copies
+  from a template directory into a fresh fork - the project's own
+  "Snapshot strategy" design decision made concrete (SQLite file copies,
+  not Postgres templates or copy-on-write).
+- `pg_sdk.FaultInjectingToolbox` / `FaultSpec`: wraps the same
+  `call()` boundary the Recorder/Player already use; one fault per tool
+  name (`latency`, `error`, `timeout`, `partial`).
+- Wired into `pg_worker.runner`: `ensure_template()` seeds a template
+  once per `env_template_id`, then every simulation forks a copy;
+  faults are read from the scenario's own `faults` column and applied
+  only when present.
+- `ReferenceAgent.respond()` now catches a tool-call failure and feeds
+  it back to the model as a result instead of crashing the whole
+  conversation - needed for fault injection to be something the agent
+  can react to rather than something that just kills the simulation.
+- 13 new unit tests (environment forking isolation, all four fault
+  kinds, a real regression test for bug 21 using actual subprocesses) -
+  65 total across the project, all passing, `ruff check` clean.
+
+**Real bug found and fixed** (full detail in DECISIONS.md): the first
+version of environment-template seeding connected to the mock services
+and disconnected without calling any tool - but each service's SQLite
+file is only created inside its first tool call, not at connect time.
+The function logged success and left an empty directory; a second call
+"reseeded" the same empty directory again. Found live (the log said
+"seeded" twice for one template id), fixed by actually calling one
+real, read-only tool per service, and covered by a regression test
+using the real subprocesses rather than a mock.
+
+**Live verification performed (not just unit tests):**
+- **Error fault**: a `get_order` scenario configured with an `error`
+  fault produced an agent reply declining to guess the order's status
+  rather than crashing or hallucinating one.
+- **Latency fault**: a 3s `latency` fault on the same tool still let
+  the agent complete correctly with the real order data once the delay
+  passed.
+- **The forking bug itself**, found by noticing the seed log fired
+  twice for what should have been an idempotent operation - fixed, then
+  proven with a regression test against the real mock-service
+  subprocesses (a mock MCP connection would not have reproduced the bug).

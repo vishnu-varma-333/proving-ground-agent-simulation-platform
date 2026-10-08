@@ -1,4 +1,6 @@
 from pg_sdk.clock import RealClock, RecordingClock, SimulatedClock
+from pg_sdk.environment import fork_environment
+from pg_sdk.faults import FaultInjectedTimeout, FaultInjectingToolbox, FaultSpec
 from pg_sdk.player import Player, ReplayMismatch, TapeExhausted, TapeOrderMismatch
 from pg_sdk.postgres import MetadataStore, apply_schema, connect_pool
 from pg_sdk.queue import (
@@ -17,6 +19,9 @@ from pg_sdk.storage import BlobStore
 __all__ = [
     "BlobStore",
     "FairDispatcher",
+    "FaultInjectedTimeout",
+    "FaultInjectingToolbox",
+    "FaultSpec",
     "MetadataStore",
     "Player",
     "RealClock",
@@ -34,5 +39,6 @@ __all__ = [
     "delete_run_consumer",
     "ensure_run_consumer",
     "ensure_stream",
+    "fork_environment",
     "publish_job",
 ]

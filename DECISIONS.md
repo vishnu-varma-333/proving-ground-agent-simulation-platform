@@ -968,3 +968,94 @@ cluster teardown - same reasoning as decision in Milestone 1).
   timing from Milestone 2's benchmarks); scaled back to `ACTIVE: False`
   within the next 2s polling check after the job completed. See
   docs/BENCHMARKS.md for the full numbers.
+
+---
+
+## Milestone 7: Snapshots and faults
+
+## 24. Fault injection as a wrapping layer, not a separate process
+
+**Options considered:** A real network proxy process sitting between
+the agent and the mock services; a layer wrapping the same `call()`
+boundary the SDK's own Recorder/Player already use.
+
+**Chosen:** `pg_sdk.FaultInjectingToolbox` - duck-type compatible with
+`MockServiceToolbox`, substituted in only when a scenario configures
+any faults.
+
+**Why:** The mock services talk to the agent over MCP stdio
+subprocesses, not network sockets - there is no socket for a
+traditional reverse proxy to sit in front of. The call boundary already
+exists and is already the single point every tool call passes through
+(it's exactly where Milestone 3's Recorder hooks in); wrapping it again
+for fault injection reuses that boundary instead of inventing a second
+transport layer solely to have somewhere to interpose.
+
+**Cost:** A fault only intercepts calls made through this specific
+Python-level boundary - if a future, different agent integration called
+an MCP tool some other way, faults configured here wouldn't apply to
+it. Acceptable: every agent in this project goes through
+`MockServiceToolbox.call()`, and nothing indicates a second code path
+is coming.
+
+## 25. One fault per tool name, not a general fault pipeline
+
+**Options considered:** Allow several faults stacked on the same tool
+(e.g., both latency and then an error); cap it at one fault per tool
+name per scenario.
+
+**Chosen:** One fault per tool (`FaultInjectingToolbox._by_tool`, a
+plain dict keyed by tool name - a second entry for the same tool
+silently overwrites the first).
+
+**Why:** Every real scenario considered for this milestone wants to ask
+one question: "what does the agent do when tool X specifically fails
+this way." Stacking faults (latency-then-error, error-on-the-third-call-
+only) is a real feature *some* evaluation suite might eventually want,
+but nothing in this project needs it yet, and building the general
+case before a real use case exists would be exactly the kind of
+speculative abstraction the project's own rules warn against.
+
+**Cost:** A scenario that wants a tool to fail differently across
+multiple calls within one conversation can't express that yet. Would
+need `FaultSpec` to carry its own call-count/sequencing state if that
+ever becomes a real requirement.
+
+---
+
+## Real bugs found while building Milestone 7
+
+21. **Environment template seeding silently created nothing.** The
+    first version of `ensure_template()` connected to the mock services
+    via MCP and disconnected without calling any tool - but each
+    service's SQLite file is only created (and, for orders/payments,
+    seeded) *inside* its first tool call, not at connect time. The
+    function reported success ("seeded new environment template...")
+    and the directory was genuinely empty on disk; a second call
+    re-"seeded" the same empty directory again, since its own existence
+    check (`orders.db` exists) never passed. Found live, not by a unit
+    test: running the worker twice against the same template id logged
+    the seeding message both times, which shouldn't happen for an
+    idempotent operation. Fixed by actually calling one real, read-only
+    tool per service (`get_order`, `get_payment`, `list_emails`) -
+    the lookup doesn't need to succeed, only to run, since that's what
+    triggers the lazy file creation. Added a regression test using the
+    real services as real subprocesses (not mocks), since the bug was
+    specifically about what a real MCP connect does and doesn't trigger
+    on its own.
+
+---
+
+## Live verification performed (Milestone 7)
+
+- **Fault injection, both configured kinds, against the real cluster
+  and real Gemini API**: an `error` fault on `get_order` made the agent
+  report the order lookup as unavailable and decline to guess a status,
+  rather than crashing or hallucinating one - the exact behavior fault
+  injection exists to test for. A `latency` fault (3s) on the same tool
+  still let the agent complete correctly with the real order data once
+  the delay passed.
+- **Environment forking bug found and fixed live**, then covered by a
+  real regression test (`platform/worker/tests/test_runner.py`) using
+  the actual mock-service subprocesses rather than a mock, since a
+  mocked MCP connection would not have reproduced the bug at all.

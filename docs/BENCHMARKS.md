@@ -336,3 +336,32 @@ beyond 4 (the spec's own "simulations per minute at 1/4/16/64 workers"
 table needs a real suite sized for that, not this milestone's
 verification-sized one), and weighted (unequal) priority scheduling -
 only equal-priority fairness has been measured so far.
+
+---
+
+## Milestone 7: Snapshots and faults
+
+### Fault injection, functional verification
+
+**What:** Whether the agent reacts sensibly to a tool failure rather
+than crashing or hallucinating.
+
+**Result:** An `error` fault on `get_order` produced a graceful decline
+("orders service temporarily unavailable... please try again later"),
+not a crash and not a fabricated status. A 3s `latency` fault on the
+same tool still completed correctly once the delay passed. Both
+observed live against the real cluster and real Gemini API.
+
+Not yet measured: a clean, isolated timing number for the latency
+fault's exact contribution (the one live run available mixed in the
+one-time template-seeding bug's overhead, since it ran before that fix
+landed) - worth a clean rerun before citing a specific number.
+
+### What's deliberately not benchmarked yet
+
+Carried over from Milestones 1-6, plus: fork time vs. Milestone 6's
+reseed-from-scratch timing (no clean side-by-side measurement taken
+this milestone - both are fast enough on this project's tiny SQLite
+files that the difference wasn't the thing worth spending verification
+time on; worth measuring once a template has enough data for the
+difference to matter).

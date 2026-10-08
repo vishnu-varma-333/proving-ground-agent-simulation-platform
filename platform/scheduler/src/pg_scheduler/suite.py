@@ -23,6 +23,7 @@ class ScenarioDef:
     user_message: str
     env_template: str
     version: int = 1
+    faults: tuple[dict, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ def load_suite(path: str | Path) -> SuiteDef:
             user_message=s["user_message"],
             env_template=s.get("env_template", "default"),
             version=s.get("version", 1),
+            faults=tuple(s.get("faults", [])),
         )
         for s in data["scenarios"]
     ]
