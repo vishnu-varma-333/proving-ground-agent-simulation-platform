@@ -440,3 +440,53 @@ latency or $ cost); a larger/adversarial calibration set (see above);
 checks observed failing in the live pipeline (only proven in a unit
 test so far, not through a real scheduler → worker run where the agent
 actually fails to satisfy one).
+
+---
+
+## Milestone 9: Console
+
+### Page response time, real pages against real data
+
+**What:** Wall-clock time for an HTTP GET against each of the
+console's four routes, `npm run dev` (Turbopack, not a production
+build), live Postgres/ClickHouse/S3 queries - not a cold start (server
+already warm from earlier manual testing in this session).
+
+**How measured:** Python `urllib.request` + `time.monotonic()`, one
+request per route, against `run_7db00aab410f` (3 real simulations,
+including one 15-step multi-turn tape).
+
+| Route | Result |
+| --- | --- |
+| `/` (run explorer, 1 run) | 93ms |
+| `/runs/run_7db00aab410f` (3 simulations, 2 ClickHouse queries) | 136ms |
+| `/simulations/sim_e1c15b35694129e3` (replay viewer, 15-step tape, 1 Postgres + 2 ClickHouse + 1 manifest + 27 deduped blob fetches from S3) | 376ms |
+| `/compare` (two-run join, 4 ClickHouse queries) | 77ms |
+
+**Honest limits:** Single-request measurements on a dev server with
+one real run's worth of data (3 simulations) - not p50/p95, not under
+load, and not a production build (`npm run build` was verified to
+compile clean, but its own serving performance wasn't separately
+timed). The replay viewer's 376ms is the one route whose cost will
+grow with tape size (it fetches every distinct blob a simulation's
+steps reference); worth re-measuring once a suite produces simulations
+with hundreds of steps rather than 9-15.
+
+### Run-to-run consistency (an incidental real data point, not a formal benchmark)
+
+Two independent runs of `suites/refunds.yaml` against the same agent
+version (`run_7db00aab410f`, `run_3be0effdaf4d` - different seeds, live
+Gemini calls both times, not replayed) produced identical outcomes on
+all 3 scenarios when diffed through the compare page: same check
+results, same judge verdicts. Not the spec's own "statistical version
+comparison with confidence intervals" (that's a v2 Extra, out of this
+milestone's scope - see Build milestones), just a real, measured
+observation surfaced for free by building the compare page.
+
+### What's deliberately not benchmarked yet
+
+Carried over from Milestones 1-8, plus: console page load under
+concurrent users (it's a single-user local dev tool today, nothing to
+measure load against); the replay viewer's cost on a tape with
+hundreds or thousands of steps (only tested up to 15); any number from
+a production (`next start`) server rather than `next dev`.

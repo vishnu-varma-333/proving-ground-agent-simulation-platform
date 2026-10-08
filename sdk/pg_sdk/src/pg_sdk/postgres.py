@@ -155,9 +155,22 @@ class MetadataStore:
                 await conn.execute("UPDATE runs SET status = $1 WHERE id = $2", status, run_id)
 
     async def create_simulation(self, sim_id: str, run_id: str, scenario_id: str, seed: int) -> None:
+        """`ON CONFLICT DO NOTHING` because sim_id is deterministic
+        (scenario version + agent version + seed - see
+        pg_scheduler.run.simulation_id): resubmitting the same suite
+        against the same agent version is documented to reuse the same
+        simulation ids rather than duplicate work, but the plain INSERT
+        here crashed with a UniqueViolationError instead of actually
+        doing that - found live while resubmitting a suite to generate
+        comparison data for the console's compare page, which also left
+        a dangling empty run row behind (submit_suite creates the run
+        row before this call, so a crash here orphans it). This fixes
+        the crash; a resubmitted simulation keeps belonging to whichever
+        run first created it."""
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO simulations (id, run_id, scenario_id, seed) VALUES ($1, $2, $3, $4)",
+                "INSERT INTO simulations (id, run_id, scenario_id, seed) VALUES ($1, $2, $3, $4) "
+                "ON CONFLICT (id) DO NOTHING",
                 sim_id,
                 run_id,
                 scenario_id,
@@ -207,3 +220,17 @@ class MetadataStore:
                 "SELECT * FROM simulations WHERE run_id = $1 ORDER BY created_at", run_id
             )
             return [dict(row) for row in rows]
+
+    async def maybe_finalize_run(self, run_id: str) -> None:
+        """Sets the run's own status once every one of its simulations has
+        reached a terminal state - 'failed' if any did, else 'completed',
+        the same rule pg_scheduler.cli's wait loop already used to decide
+        its exit code, just never persisted. Called after each simulation
+        finishes; a harmless race if two workers finish a run's last two
+        simulations at once (both see every simulation terminal and write
+        the same final status - idempotent, not a double-count)."""
+        sims = await self.list_simulations_for_run(run_id)
+        if not sims or any(s["state"] not in ("completed", "failed") for s in sims):
+            return
+        status = "failed" if any(s["state"] == "failed" for s in sims) else "completed"
+        await self.set_run_status(run_id, status, finished=True)

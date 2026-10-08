@@ -169,12 +169,14 @@ async def process_job(
         )
         await msg.ack()
         logger.info("completed sim=%s", job.sim_id)
+        await store.maybe_finalize_run(job.run_id)
 
     except Exception as exc:
         logger.exception("sim=%s failed on attempt %d", job.sim_id, attempt)
         if attempt >= MAX_DELIVER:
             await store.finish_simulation(job.sim_id, "failed", None, {"error": str(exc)})
             await msg.ack()  # exhausted - acking stops JetStream retrying a lost cause forever
+            await store.maybe_finalize_run(job.run_id)
         else:
             await store.retry_simulation(job.sim_id)
             await msg.nak()

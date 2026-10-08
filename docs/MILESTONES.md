@@ -18,7 +18,7 @@ as a teaching curriculum later.
 - [x] **7. Snapshots and faults** — Environment forking and the
       fault-injection proxy.
 - [x] **8. Evaluation** — State checks, simulated users, calibrated judges.
-- [ ] **9. Console** — Run explorer, replay viewer, version comparison.
+- [x] **9. Console** — Run explorer, replay viewer, version comparison.
 - [ ] **10. Ship it** — AWS deploy on spot nodes, scale and determinism
       reports, demo video, docs, write-up.
 - [ ] **11. Version 2** — Failure shrinking, production capture, adversarial
@@ -671,3 +671,86 @@ DECISIONS.md rather than folded into "bugs found live."
 - Stacking a simulated-user scenario with fault injection together in
   one live run (both paths are proven independently; not yet proven
   together).
+
+---
+
+## Milestone 9: Console
+
+**Status:** Done, live-verified. **Started / finished:** 2026-10-08.
+
+**Goal.** The spec's exact Milestone 9 scope: a Next.js/TypeScript
+console with a run explorer (run overviews, failure lists), a step-
+by-step replay viewer that surfaces the simulated clock, and a side-
+by-side comparison of two agent versions on the same suite - reading
+live from the same Postgres, ClickHouse and S3 the rest of the
+platform already writes to, with no separate API service.
+
+**What got built:**
+- `console/` - a Next.js 16 (App Router, TypeScript, Tailwind) app with
+  `lib/postgres.ts`, `lib/clickhouse.ts`, `lib/tape.ts`: three plain
+  server-side data modules, no REST layer in between (decision 31).
+- `/` - every run, newest first, with live pass/fail/pending counts.
+- `/runs/[runId]` - a run's simulations with each scenario's checks
+  (from ClickHouse) and judge score, failed rows visually flagged.
+- `/simulations/[simId]` - the full recorded tape in order: every
+  model/tool/clock step, the simulated clock's actual recorded value
+  shown inline for clock reads, and each step's full input/output
+  (read straight from the same S3 manifest + content-addressed blobs
+  `pg_sdk.Player` replays from - decision 32, not a separate ClickHouse
+  Step table) expandable via native `<details>`.
+- `/compare?a=&b=` - two runs of the same suite joined by scenario id,
+  each scenario's outcome (ok / regressed / missing) on both sides and
+  whether it changed.
+- A deliberately restrained dark-only design system (one accent color,
+  four semantic status colors, Geist Sans/Mono) - decision 33 - built
+  specifically so the console reads as a serious internal engineering
+  tool rather than a generic dashboard template.
+- Two real backend bugs found and fixed while wiring the console
+  against real data (both covered in DECISIONS.md and live-verified
+  against the running cluster, not just unit-tested):
+  1. `runs.status` was never persisted anywhere - every run sat at
+     `'pending'` in Postgres forever, even long after every one of its
+     simulations had finished. Fixed with
+     `MetadataStore.maybe_finalize_run`, called from the worker right
+     after each simulation's terminal state is recorded.
+  2. `MetadataStore.create_simulation` crashed with a
+     `UniqueViolationError` on a resubmitted suite instead of the
+     idempotent no-op its own docstring already promised (simulation
+     ids are deterministic by design) - found while resubmitting a
+     suite to generate comparison data, which also left a dangling,
+     zero-simulation run row behind. Fixed with `ON CONFLICT DO
+     NOTHING`.
+
+**Live verification performed (not just a dev-server screenshot):**
+- Ran the real dev server against the real cluster and the real tape
+  from Milestone 8's own `run_7db00aab410f`: the run explorer, run
+  detail and replay viewer all rendered genuine data end to end,
+  including expanding a real recorded Gemini request/response pair out
+  of S3 and a real clock-read step's recorded timestamp.
+- **Mobile viewport caught a real layout bug live**: at 375px wide, the
+  data tables overflowed the page itself rather than scrolling in
+  place. Fixed by wrapping each table in its own `overflow-x-auto`
+  container; re-verified at the same width afterward.
+- **Compare page, every branch exercised against real rows**: a self-
+  comparison (`a=b=run_7db00aab410f`) proved the "no change" path
+  against real joined data; a second, explicitly-labeled test run
+  written directly into the real Postgres/ClickHouse tables (same
+  technique as the `maybe_finalize_run` verification above, cleaned up
+  immediately after) proved the "regressed," "missing," and "changed"
+  paths all render correctly. A true second *agent-generated* run
+  (resubmitting the suite with a different seed) took about 6 minutes
+  on its third scenario under heavy free-tier throttling but did
+  complete - `run_3be0effdaf4d`, a genuinely independent second run,
+  diffed against the first with all three scenarios comparing
+  identical ("no change"), a real data point about this reference
+  agent's run-to-run consistency, not just a UI smoke test.
+- `npm run build` (production build, not just the dev server) compiles
+  clean with no type errors.
+
+**Still pending, deliberately left for later:**
+- Any real auth/access control on the console - it's a local, read-
+  only dev tool today; Milestone 10's hosted recruiter demo will need
+  to address this before the console is reachable from outside this
+  machine.
+- A light theme (deliberately deferred, not forgotten - see decision
+  33).

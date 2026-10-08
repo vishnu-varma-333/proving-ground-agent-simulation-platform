@@ -1,0 +1,93 @@
+@import "tailwindcss";
+
+/*
+  A deliberately small, dark-first palette for a data-dense internal tool
+  (run explorer / replay viewer), not a marketing site: one accent color
+  for interactive elements, four semantic colors for simulation/check
+  state, and a restrained neutral scale for everything else. No gradients,
+  no decorative color - every color here maps to a specific meaning.
+*/
+:root {
+  --bg: #09090b;
+  --bg-raised: #111113;
+  --bg-hover: #18181b;
+  --border: #27272a;
+  --border-muted: #1c1c1f;
+
+  --text: #e4e4e7;
+  --text-muted: #a1a1aa;
+  --text-faint: #71717a;
+
+  --accent: #818cf8;
+  --accent-strong: #a5b4fc;
+  --accent-bg: rgba(129, 140, 248, 0.12);
+
+  --success: #34d399;
+  --success-bg: rgba(52, 211, 153, 0.1);
+  --danger: #f87171;
+  --danger-bg: rgba(248, 113, 113, 0.1);
+  --warning: #fbbf24;
+  --warning-bg: rgba(251, 191, 36, 0.1);
+  --neutral: #a1a1aa;
+  --neutral-bg: rgba(161, 161, 170, 0.1);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-raised: var(--bg-raised);
+  --color-bg-hover: var(--bg-hover);
+  --color-border: var(--border);
+  --color-border-muted: var(--border-muted);
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-text-faint: var(--text-faint);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-bg: var(--accent-bg);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
+  --color-warning: var(--warning);
+  --color-warning-bg: var(--warning-bg);
+  --color-neutral: var(--neutral);
+  --color-neutral-bg: var(--neutral-bg);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+* {
+  border-color: var(--border);
+}
+
+::selection {
+  background: var(--accent-bg);
+  color: var(--accent-strong);
+}
+
+/* Thin, muted scrollbars - a visible default scrollbar reads as an
+   unstyled page on a console this dense. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+}

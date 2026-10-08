@@ -1237,3 +1237,198 @@ misread - not retried differently from any other judge failure.
   by re-reading that config file before the first live call, not by a
   failure, so it's noted here rather than under "real bugs found live"
   to avoid overstating it.
+
+---
+
+## Milestone 9: Console
+
+## 31. The console talks to Postgres, ClickHouse and S3 directly from Next.js server components - no separate API service
+
+**Options considered:** A dedicated backend (FastAPI or similar)
+exposing a REST/GraphQL API that the Next.js frontend calls; Next.js
+Server Components and Route Handlers reading Postgres (`pg`),
+ClickHouse (raw HTTP) and S3 (`@aws-sdk/client-s3`) directly, server-
+side, on every request.
+
+**Chosen:** The latter - `console/lib/{postgres,clickhouse,tape}.ts`
+are plain server-only modules imported straight into page components
+(`export const instant = false` opts each page out of Next 16's new
+build-time prerendering, since every page reads live request-time
+state).
+
+**Why:** The spec's own tech-stack table lists exactly one entry for
+Console - "Next.js, TypeScript" - no separate API layer. The console
+is read-only and has no reason to exist independently of the pages
+that render it; a REST layer in between would just be JSON-shaped
+re-exports of the same three queries, adding a service to deploy,
+version and keep in sync with the schema for no real benefit at this
+project's scale. Server Components already run on the server, with
+the same network access a backend process would have.
+
+**Cost:** Database credentials live in the console's own process, not
+behind a separate API boundary - acceptable for an internal/read-only
+tool talking to infrastructure it's already trusted to read, not
+something to also expose over the public internet without adding
+auth, which Milestone 10 (hosted demo) will need to address.
+
+## 32. Step-by-step replay reads the S3 tape directly, not a ClickHouse Step table
+
+**Options considered:** Add the `Step` entity the spec's own data
+model names (ClickHouse: `sim_id, seq, kind, input_hash, output_ref,
+real_ms, virtual_ts`) and have the worker write one row per step
+alongside the S3 tape it already writes; read the replay viewer's
+step list straight from the S3 manifest `pg_sdk.recorder.Recorder`
+already produces (decision 11), with no new write path.
+
+**Chosen:** Read from S3. `console/lib/tape.ts` fetches
+`runs/<sim_id>/manifest.json` (built by `Recorder.finalize()`) and the
+individual blobs it references, exactly the same data
+`pg_sdk.Player` replays from - the console is a second reader of the
+same tape, not a second store of the same facts.
+
+**Why:** ClickHouse's own stated purpose in this spec is fast
+aggregation over millions of steps across many simulations - not
+needed by any of this milestone's three features (run explorer and
+version comparison aggregate at the *simulation* level, already served
+by Postgres `simulations.result` and the `check_results`/
+`judge_scores` tables from Milestone 8; the replay viewer reads
+exactly one simulation's steps in order, which a manifest file is
+already shaped for, in insertion order, with no query needed at all).
+Writing a Step table that nothing reads would be unverified surface
+area and a second source of truth for data S3 already holds
+correctly - the opposite of what Milestone 4's replay fidelity work
+was for. This is a real, deliberate deviation from the spec's literal
+data-model placement, so it's recorded here rather than silently
+differing from it.
+
+**Cost:** A step-level *cross-run* query ("every tool-call step that
+took over 2s across the whole fleet") isn't possible without opening
+every matching simulation's manifest individually - exactly the
+access pattern ClickHouse exists to make fast. Worth revisiting if a
+later milestone (coverage reports, adversarial generation) needs that
+query shape; nothing in Milestone 9 does.
+
+## 33. Design system: one accent color, four semantic status colors, dark-only
+
+**Options considered:** A light/dark toggle following
+`prefers-color-scheme`, like the rest of this project's console-
+adjacent tooling (Grafana, etc.) defaults to; a single deliberate
+dark theme with no toggle.
+
+**Chosen:** Dark-only (`color-scheme: dark` fixed in `globals.css`,
+no media query), a small CSS-variable palette (`console/app/
+globals.css`): one accent (indigo, interactive elements only),
+`success`/`danger`/`warning`/`neutral` for simulation and check state,
+a five-step neutral scale for text/borders/backgrounds, Geist Sans and
+Geist Mono (already Next.js's own default font choice) for body text
+and every id/hash/timestamp respectively.
+
+**Why:** This console's job is showing dense, specific facts (run
+ids, hashes, pass/fail counts, timestamps) about a backend system, not
+a marketing surface - the reference points that read as "serious
+engineering tool" rather than "generic SaaS dashboard" (Linear,
+Vercel's own dashboard, Datadog) are consistently dark, data-dense,
+and restrained: one interactive color so it's never ambiguous what's
+clickable, semantic color used only for state that's actually
+true/false/pending, monospace reserved specifically for the
+identifiers a reader might copy or compare, never for prose. A
+light/dark toggle this early would have meant designing and
+maintaining two palettes before either one had been looked at once;
+better to get one right first.
+
+**Cost:** No light mode for anyone who wants one. Trivial to add later
+since every color is already a CSS variable behind a semantic name
+(`--success`, not a literal hex value at each call site) - a light
+palette is a second `:root` block away, not a rewrite.
+
+## 34. Interactivity via native HTML, not client components
+
+**Options considered:** A client-side run picker (`"use client"`,
+`useState`, `fetch` on change) for the compare page's two run
+selectors and expand/collapse for each replay step's input/output; a
+plain `<form method="get">` whose submit navigates to `/compare?a=&b=`
+server-side, and native `<details>/<summary>` for expand/collapse.
+
+**Chosen:** The native HTML forms.
+
+**Why:** Every piece of "interactivity" this console needs - pick two
+runs and see a new page, expand one step's JSON - is already something
+HTML does on its own, server-rendered, with zero client JavaScript and
+no loading-state code to write or get wrong. Reaching for a client
+component here would be solving a problem the browser already solves,
+for a console whose primary audience (a developer investigating a
+failed run) cares about data density and load speed, not transitions.
+
+**Cost:** No optimistic UI, no in-place filtering without a page
+navigation. Not a real cost for a run explorer and replay viewer -
+every view here is already "look up a specific record by id," which a
+server-rendered page does at least as fast as a client-side fetch
+would, with less code.
+
+---
+
+## Real bugs found while building Milestone 9
+
+22. **`runs.status` was never persisted.** `MetadataStore.set_run_status`
+    existed since Milestone 1's schema but nothing ever called it -
+    every run sat at its default `'pending'` in Postgres forever, even
+    long after every one of its simulations had completed. Invisible
+    until something actually displayed `runs.status` as a fact, which
+    nothing did before this milestone's run explorer. Fixed with
+    `MetadataStore.maybe_finalize_run(run_id)` (status = `'failed'` if
+    any simulation failed, else `'completed'`, mirroring the exit-code
+    rule `pg_scheduler.cli`'s own wait loop already used without
+    persisting it), called from `pg_worker.runner.process_job` right
+    after each simulation's terminal state is recorded. Verified live
+    against the real cluster, both branches: an already-completed real
+    run's status flipped from `pending` to `completed` on the first
+    call, and a constructed partial/mixed-outcome case correctly
+    stayed `pending` until fully done, then finalized as `failed`.
+23. **`create_simulation` crashed instead of behaving idempotently.**
+    `pg_scheduler.run.simulation_id` is deliberately deterministic
+    (scenario version + agent version + seed), and `submit_suite`'s own
+    docstring already documents that resubmitting the same suite
+    against the same agent version is supposed to reuse the same
+    simulation ids "rather than silently duplicating work" - but the
+    plain `INSERT` backing it had no conflict handling, so a resubmit
+    crashed with `UniqueViolationError` instead. Found live while
+    resubmitting `suites/refunds.yaml` to generate a second run for the
+    console's compare page to look at. The crash also left a dangling,
+    zero-simulation run row behind (`submit_suite` creates the run row
+    before looping over scenarios, so a mid-loop crash orphans it).
+    Fixed with `ON CONFLICT (id) DO NOTHING`; the orphaned test row was
+    deleted by hand, not left in the live data.
+
+---
+
+## Live verification performed (Milestone 9)
+
+- **Every page, against Milestone 8's real recorded data**: the run
+  explorer, run detail and replay viewer all rendered
+  `run_7db00aab410f`'s genuine rows from the live cluster - including
+  expanding a real recorded Gemini request/response pair straight out
+  of S3 in the replay viewer, and a real clock-read step's actual
+  recorded timestamp shown inline exactly where the spec asks for "the
+  simulated clock."
+- **A real responsive-layout bug, caught by actually resizing the
+  viewport to 375px** (not assumed from the code): every data table
+  overflowed the page itself instead of scrolling within its own
+  panel. Fixed by wrapping each table in `overflow-x-auto`; re-checked
+  at the same width afterward.
+- **The compare page's every branch, against real rows**: a self-
+  comparison (`a=b=run_7db00aab410f`) proved the "no change" path
+  against genuinely joined Postgres/ClickHouse data; a second run
+  written directly into the same real tables with a deliberately
+  different outcome (same technique as bug 22's verification, cleaned
+  up immediately after) proved "regressed," "missing" and "changed"
+  all render correctly. A fully organic second run (resubmitting the
+  suite with a different seed to get fresh simulation ids, per bug 23)
+  took roughly 6 minutes on its third, `simulated_user` scenario -
+  heavy free-tier throttling (repeated 429/503s, visible in the worker
+  log), not quota exhaustion - but did complete, giving a true second
+  agent-generated run (`run_3be0effdaf4d`) to diff against the first:
+  all three scenarios compared identical ("no change"), a real data
+  point about this reference agent's consistency across independent
+  runs of the same suite, not just a UI check.
+- `npm run build` (production build, not just the dev server) compiles
+  clean with no type errors.
