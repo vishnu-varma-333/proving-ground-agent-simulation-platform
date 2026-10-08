@@ -57,13 +57,16 @@ class MetadataStore:
         version: int = 1,
         faults: list | None = None,
         checks: list | None = None,
+        simulated_user: bool = False,
+        max_turns: int = 1,
     ) -> None:
         async with self.pool.acquire() as conn:
             await conn.execute(
                 """
                 INSERT INTO scenarios
-                    (id, version, persona, goal, user_message, env_template_id, faults, checks)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                    (id, version, persona, goal, user_message, env_template_id, faults, checks,
+                     simulated_user, max_turns)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (id) DO UPDATE SET
                     version = EXCLUDED.version,
                     persona = EXCLUDED.persona,
@@ -71,7 +74,9 @@ class MetadataStore:
                     user_message = EXCLUDED.user_message,
                     env_template_id = EXCLUDED.env_template_id,
                     faults = EXCLUDED.faults,
-                    checks = EXCLUDED.checks
+                    checks = EXCLUDED.checks,
+                    simulated_user = EXCLUDED.simulated_user,
+                    max_turns = EXCLUDED.max_turns
                 """,
                 scenario_id,
                 version,
@@ -81,6 +86,8 @@ class MetadataStore:
                 env_template_id,
                 json.dumps(faults or []),
                 json.dumps(checks or []),
+                simulated_user,
+                max_turns,
             )
 
     async def upsert_suite(self, suite_id: str, name: str, scenario_ids: list[str]) -> None:

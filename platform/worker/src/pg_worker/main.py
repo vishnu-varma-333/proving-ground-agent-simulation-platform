@@ -18,6 +18,7 @@ import logging
 
 from dotenv import load_dotenv
 from pg_sdk import (
+    ClickHouseClient,
     FairDispatcher,
     MetadataStore,
     SimulationJob,
@@ -44,6 +45,9 @@ async def main_loop(once: bool, once_timeout: float = 10.0) -> None:
     nc, js = await connect_js()
     dispatcher = FairDispatcher(js)
 
+    clickhouse = ClickHouseClient()
+    await asyncio.to_thread(clickhouse.apply_schema)
+
     logger.info("worker started (once=%s)", once)
     try:
         elapsed = 0.0
@@ -63,7 +67,7 @@ async def main_loop(once: bool, once_timeout: float = 10.0) -> None:
                 continue
 
             job = SimulationJob.from_json(msg.data)
-            await process_job(store, job, msg)
+            await process_job(store, job, msg, clickhouse)
             if once:
                 return
     finally:

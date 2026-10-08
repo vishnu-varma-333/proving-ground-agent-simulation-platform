@@ -5,6 +5,8 @@ requires-python = ">=3.12"
 dependencies = [
   "pg-sdk",
   "reference-agent",
+  "simulated-user",
+  "judge",
   "python-dotenv>=1.0",
   "prometheus-client>=0.20",
 ]
@@ -12,6 +14,8 @@ dependencies = [
 [tool.uv.sources]
 pg-sdk = { workspace = true }
 reference-agent = { workspace = true }
+simulated-user = { workspace = true }
+judge = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]

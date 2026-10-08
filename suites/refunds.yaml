@@ -1,6 +1,8 @@
-# A minimal suite: two refund scenarios against the reference agent.
-# "Scenario" here means persona/goal labels plus one driving message -
-# a full multi-turn simulated-user persona is Milestone 8's job.
+# A minimal suite: refund scenarios against the reference agent, each
+# with a deterministic state check ("refund issued exactly once" -
+# Milestone 8's own example) run against the forked payments.db once
+# the agent finishes. refund-via-chat uses a multi-turn simulated_user
+# persona instead of a single fixed message (Milestone 8's other half).
 suite:
   id: refunds-suite
   name: Refund scenarios
@@ -19,9 +21,34 @@ scenarios:
     goal: Get a refund for order ord_1001
     user_message: "I'd like a refund for order ord_1001, it arrived damaged."
     env_template: default
+    checks:
+      - description: refund issued exactly once for ord_1001
+        service: payments
+        sql: "SELECT COUNT(*) AS n FROM refunds WHERE order_id = ?"
+        params: ["ord_1001"]
+        expect: {n: 1}
 
   - id: refund-defective-stand
     persona: Customer with a defective item
     goal: Get a refund for order ord_1004
     user_message: "I'd like a refund for order ord_1004, it's defective."
     env_template: default
+    checks:
+      - description: refund issued exactly once for ord_1004
+        service: payments
+        sql: "SELECT COUNT(*) AS n FROM refunds WHERE order_id = ?"
+        params: ["ord_1004"]
+        expect: {n: 1}
+
+  - id: refund-via-chat
+    persona: Polite customer who needs a bit of back-and-forth to confirm details
+    goal: Get a refund for order ord_1002 and a confirmation email
+    simulated_user: true
+    max_turns: 4
+    env_template: default
+    checks:
+      - description: refund issued exactly once for ord_1002
+        service: payments
+        sql: "SELECT COUNT(*) AS n FROM refunds WHERE order_id = ?"
+        params: ["ord_1002"]
+        expect: {n: 1}

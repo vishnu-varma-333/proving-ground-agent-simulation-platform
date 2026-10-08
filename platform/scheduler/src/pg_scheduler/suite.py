@@ -1,10 +1,13 @@
 """Suite/scenario file format: the first real formalization of "Scenario
 definitions" (core feature #1 in the spec), kept deliberately minimal.
-A scenario here is a persona/goal label plus the one user message that
-drives the reference agent - a full multi-turn simulated-user persona
-that roleplays goal-directed conversation is Milestone 8's job
-(evaluation's "simulated users"), not this one's. This milestone needs
-something real to schedule, not a complete scenario-authoring system.
+A scenario is a persona/goal label plus either a single fixed
+user_message (the original, deterministic-input form) or
+simulated_user: true, which instead drives the agent through a
+multi-turn conversation generated live by a Gemini-backed persona
+(Milestone 8's "simulated users" - see agents/simulated_user). `checks`
+is a list of deterministic state-check specs (pg_sdk.checks.CheckSpec)
+run against the simulation's forked mock-service data once the agent
+finishes - Milestone 8's other half, "state checks".
 """
 
 from __future__ import annotations
@@ -24,6 +27,9 @@ class ScenarioDef:
     env_template: str
     version: int = 1
     faults: tuple[dict, ...] = ()
+    checks: tuple[dict, ...] = ()
+    simulated_user: bool = False
+    max_turns: int = 4
 
 
 @dataclass(frozen=True)
@@ -46,10 +52,13 @@ def load_suite(path: str | Path) -> SuiteDef:
             id=s["id"],
             persona=s["persona"],
             goal=s["goal"],
-            user_message=s["user_message"],
+            user_message=s.get("user_message", ""),
             env_template=s.get("env_template", "default"),
             version=s.get("version", 1),
             faults=tuple(s.get("faults", [])),
+            checks=tuple(s.get("checks", [])),
+            simulated_user=s.get("simulated_user", False),
+            max_turns=s.get("max_turns", 4),
         )
         for s in data["scenarios"]
     ]

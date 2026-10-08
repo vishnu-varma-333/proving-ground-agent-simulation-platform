@@ -1,3 +1,5 @@
+from pg_sdk.checks import CheckResult, CheckSpec, run_check, run_checks
+from pg_sdk.clickhouse import ClickHouseClient, ClickHouseConfig
 from pg_sdk.clock import RealClock, RecordingClock, SimulatedClock
 from pg_sdk.environment import fork_environment
 from pg_sdk.faults import FaultInjectedTimeout, FaultInjectingToolbox, FaultSpec
@@ -18,6 +20,10 @@ from pg_sdk.storage import BlobStore
 
 __all__ = [
     "BlobStore",
+    "CheckResult",
+    "CheckSpec",
+    "ClickHouseClient",
+    "ClickHouseConfig",
     "FairDispatcher",
     "FaultInjectedTimeout",
     "FaultInjectingToolbox",
@@ -41,4 +47,6 @@ __all__ = [
     "ensure_stream",
     "fork_environment",
     "publish_job",
+    "run_check",
+    "run_checks",
 ]

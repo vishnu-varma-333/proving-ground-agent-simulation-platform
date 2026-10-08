@@ -365,3 +365,78 @@ this milestone - both are fast enough on this project's tiny SQLite
 files that the difference wasn't the thing worth spending verification
 time on; worth measuring once a template has enough data for the
 difference to matter).
+
+---
+
+## Milestone 8: Evaluation
+
+### Judge reliability: Cohen's kappa against a hand-labelled set (the spec's own named metric)
+
+**What:** Agreement between a human label and the real AI judge's
+`resolved` verdict, on real transcripts.
+
+**How measured:** `scripts/calibrate_judge.py`. Four real
+`ReferenceAgent` runs against the real mock services (not synthetic
+text): two plain refund requests that succeed normally; one refund
+request for an order whose payment lookup is wrapped in Milestone 7's
+own fault injection (`issue_refund` → `error`, so the refund genuinely
+cannot be issued); one refund request for an order id that doesn't
+exist. Each transcript was hand-labelled (`resolved: true/false`) by
+reading the agent's actual printed reply *before* requesting the
+judge's verdict, then scored live by `judge.score_conversation`
+(`gemini-flash-lite-latest`).
+
+| Metric | Result |
+| --- | --- |
+| Labelled examples (n) | 4 |
+| Raw agreement | 4/4 (100%) |
+| Cohen's kappa | 1.000 |
+
+**Honest limits of this number:** `n=4` is small - the spec says
+"calibrated against a small human-labelled set," and this is that,
+not a claim of general reliability. Only two real failure modes are
+represented (a fault-injected service outage, a nonexistent order);
+a judge that's wrong about something subtler (a wrong refund *amount*,
+a refund issued to the wrong order, a technically-correct-but-rude
+reply) hasn't been exercised yet. Worth a larger, more adversarial
+calibration set before citing this kappa as evidence of anything
+beyond "the judge got these four right."
+
+### State checks against a real forked environment
+
+**What:** Whether a deterministic SQL check against a simulation's own
+forked `payments.db` actually reflects what the agent did, end to end
+through the real scheduler → NATS → worker pipeline (not called
+directly in a unit test).
+
+**Result:** All 3 scenarios in `suites/refunds.yaml` (2 fixed-message,
+1 `simulated_user: true`) ran a real "refund issued exactly once"
+check against their own forked environment; all 3 checks passed and
+were written to a real ClickHouse `check_results` row - ClickHouse's
+first genuine write in this project (stood up in Milestone 1, unused
+until now). The check's *failure* path is proven directly against a
+real SQLite file in `sdk/pg_sdk/tests/test_checks.py`, not live here -
+every scenario in the current suite happens to succeed, so a live
+failing check hasn't been observed in this pipeline yet.
+
+### Simulated user: conversation length vs. a fixed single message
+
+**What:** Whether the multi-turn simulated-user path actually drives a
+longer, different conversation than the original fixed-message form,
+in the same live run.
+
+**Result:** The `refund-via-chat` scenario (simulated user, `max_turns:
+4`) recorded **15 steps**; the two fixed-message scenarios in the same
+run recorded **9 steps** each. Measured from each simulation's own
+`manifest["step_count"]`, same run, same agent, same cluster - not an
+estimate.
+
+### What's deliberately not benchmarked yet
+
+Carried over from Milestones 1-7, plus: judge latency/cost per call
+(not measured - the spec's "judge-model latency/accuracy" note from
+Milestone 2 is only half-closed here, accuracy via kappa above, not
+latency or $ cost); a larger/adversarial calibration set (see above);
+checks observed failing in the live pipeline (only proven in a unit
+test so far, not through a real scheduler → worker run where the agent
+actually fails to satisfy one).

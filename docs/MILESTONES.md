@@ -17,7 +17,7 @@ as a teaching curriculum later.
       retries, Kubernetes Jobs, KEDA autoscaling. Kill tests.
 - [x] **7. Snapshots and faults** — Environment forking and the
       fault-injection proxy.
-- [ ] **8. Evaluation** — State checks, simulated users, calibrated judges.
+- [x] **8. Evaluation** — State checks, simulated users, calibrated judges.
 - [ ] **9. Console** — Run explorer, replay viewer, version comparison.
 - [ ] **10. Ship it** — AWS deploy on spot nodes, scale and determinism
       reports, demo video, docs, write-up.
@@ -568,3 +568,106 @@ using the real subprocesses rather than a mock.
   twice for what should have been an idempotent operation - fixed, then
   proven with a regression test against the real mock-service
   subprocesses (a mock MCP connection would not have reproduced the bug).
+
+---
+
+## Milestone 8: Evaluation
+
+**Status:** Done, live-verified. **Started / finished:** 2026-10-08.
+
+**Goal.** The spec's core feature #8, two halves: deterministic checks
+on a simulation's final mock-service state ("refund issued exactly
+once"), and AI judges scoring conversation quality, calibrated against
+a small human-labelled set (target metric: Cohen's kappa). Building
+this also meant finally building the multi-turn "simulated user"
+persona that Milestone 6's scenario format explicitly deferred - a
+scenario can now either send one fixed message (the original form) or
+set `simulated_user: true` and let a Gemini-backed persona hold a real
+back-and-forth with the agent until it decides its own goal is met.
+
+**What got built:**
+- `pg_sdk.checks` (`CheckSpec`/`CheckResult`/`run_checks`): plain SQL
+  assertions against a simulation's own forked service database -
+  the spec's own "refund issued exactly once" example is one query
+  away, no bespoke check-type DSL needed.
+- `pg_sdk.clickhouse` (`ClickHouseClient`): ClickHouse's first real
+  write in this project - raw HTTP (`JSONEachRow`), two tables
+  (`check_results`, `judge_scores`) matching the data model the spec
+  named back in Milestone 1 and that sat unused until now.
+- `agents/eval_common`: a second, smaller, stateless implementation of
+  the reference agent's own key/model-rotation retry idea
+  (`generate_text`), used by the two new packages below - deliberately
+  not shared code with `reference_agent.agent`, which is the tested
+  system under test, not a library to extend.
+- `agents/simulated_user` (`SimulatedUser`): a persona that generates
+  the customer's next message from its own persona/goal and the
+  agent's last reply, and decides for itself (not a fixed turn count)
+  when its goal has been met, capped by `max_turns` as a safety bound.
+  Not recorded or replayed - it plays the role a human tester typing
+  messages would, not the system under determinism test.
+- `agents/judge` (`score_conversation`, `cohen_kappa`): an AI judge
+  that scores a finished transcript against its scenario's persona/
+  goal (`resolved: bool`, `score: 1-5`, a one-line rationale), plus a
+  direct (no-sklearn) implementation of Cohen's kappa for calibration.
+- `scenarios` table gained `simulated_user` and `max_turns` columns
+  (the existing `checks` JSONB column, present but unused since
+  Milestone 6, is now actually read and written); `suite.py`/`run.py`
+  wire both new fields and `checks` end to end from suite YAML through
+  to the worker.
+- `pg_worker.runner.run_conversation`: branches between the original
+  fixed-message flow and the new simulated-user loop, returning a
+  uniform transcript either way; `process_job` now also runs the
+  scenario's checks and the judge after the agent finishes, writing
+  both to ClickHouse and surfacing a summary (`checks_passed`,
+  `judge_resolved`, `judge_score`) in the simulation's own Postgres
+  result.
+- `scripts/calibrate_judge.py`: runs four real scenarios (two plain
+  successes, one driven through Milestone 7's own fault injection, one
+  against a nonexistent order) through the real agent, hand-labels
+  each from its actual reply, scores each with the real judge, and
+  reports the real Cohen's kappa.
+- 22 new unit tests (state checks against a real SQLite schema,
+  simulated-user turn-taking and stop conditions, judge JSON parsing,
+  Cohen's kappa edge cases, the worker's conversation-branching logic
+  with fakes) - 87 total across the project, all passing.
+
+**No genuine runtime bug surfaced live this milestone** - the first
+milestone where that's true. One real mistake was caught before
+causing one: `ClickHouseConfig`'s first draft pointed at ClickHouse's
+in-cluster NodePort (30123) instead of the actual host port kind maps
+it to (28123) - caught by re-reading `infra/kind/cluster-config.yaml`
+before the first live call, not by a failure. Documented honestly in
+DECISIONS.md rather than folded into "bugs found live."
+
+**Live verification performed (not just unit tests):**
+- **State checks against the real cluster**: all three scenarios in
+  `suites/refunds.yaml` ran through the real scheduler → NATS → worker
+  pipeline; each scenario's "refund issued exactly once" check ran
+  against its own forked `payments.db` and the result landed in a real
+  ClickHouse row. All three passed.
+- **Simulated user against the real agent and real Gemini API**: the
+  new `refund-via-chat` scenario produced a genuine multi-turn
+  conversation (persona asks → agent asks for the order id → persona
+  answers → agent issues the refund → persona says `DONE`) - 15
+  recorded steps versus 9 for the single-message scenarios run in the
+  same batch. The run hit real 429/503 responses partway through
+  (free-tier throttling, not injected) and recovered via
+  `eval_common.gemini`'s own retry/rotation.
+- **Judge calibration, real numbers**: 4 real transcripts (2 plain
+  successes, 1 real payments-outage failure via fault injection, 1
+  nonexistent-order failure), each hand-labelled before the judge's
+  verdict was requested. Raw agreement 4/4, **Cohen's kappa = 1.000**.
+  Reported as a small sample (`n=4`) - a real, measured number on the
+  set this project has, not a general reliability claim. Full numbers
+  and setup in docs/BENCHMARKS.md.
+
+**Still pending, deliberately left for later:**
+- A broader, more diverse calibration set (more failure modes than
+  "payments outage" and "nonexistent order", disagreement cases to see
+  how kappa behaves when the judge is actually wrong about something).
+- Running the judge on a sample rather than every simulation, once
+  suite sizes grow large enough for that cost tradeoff to matter (every
+  simulation gets judged today - cheap at this project's scale).
+- Stacking a simulated-user scenario with fault injection together in
+  one live run (both paths are proven independently; not yet proven
+  together).

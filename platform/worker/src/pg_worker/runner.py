@@ -1,13 +1,17 @@
 """Runs one simulation job: claims it, forks an isolated environment
 from a persistent template (Milestone 7 - replaces Milestone 6's
 reseed-from-scratch stand-in), drives the reference agent through the
-scenario's message with a real Recorder (and fault injection if the
-scenario specifies any), records the result, acks or nacks the NATS
-message.
+scenario's conversation (a fixed single message, or a multi-turn
+simulated_user persona - Milestone 8) with a real Recorder (and fault
+injection if the scenario specifies any), runs the scenario's
+deterministic state checks and an AI judge against the finished
+conversation (Milestone 8's "evaluation"), records the result, acks or
+nacks the NATS message.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -16,18 +20,23 @@ import tempfile
 import uuid
 from pathlib import Path
 
+from judge.scorer import score_conversation
 from nats.aio.msg import Msg
 from pg_sdk import (
     BlobStore,
+    CheckSpec,
+    ClickHouseClient,
     FaultInjectingToolbox,
     FaultSpec,
     MetadataStore,
     Recorder,
     SimulationJob,
     fork_environment,
+    run_checks,
 )
 from reference_agent.agent import ReferenceAgent
 from reference_agent.mcp_tools import MockServiceToolbox
+from simulated_user import SimulatedUser
 
 logger = logging.getLogger("pg_worker")
 
@@ -65,7 +74,37 @@ async def ensure_template(template_id: str) -> Path:
     return template_dir
 
 
-async def process_job(store: MetadataStore, job: SimulationJob, msg: Msg) -> None:
+async def run_conversation(
+    agent: ReferenceAgent, scenario: dict
+) -> tuple[str, list[dict[str, str]]]:
+    """Drives either the original fixed single-message scenario, or
+    (Milestone 8) a multi-turn simulated_user persona that reacts to the
+    agent's replies until it decides its goal is met or max_turns is
+    hit. Returns the agent's final reply and the full transcript (used
+    by the judge below) in the same [{"role", "text"}, ...] shape
+    either way."""
+    if not scenario.get("simulated_user"):
+        user_message = scenario["user_message"]
+        reply = await agent.respond(user_message)
+        return reply, [{"role": "user", "text": user_message}, {"role": "agent", "text": reply}]
+
+    sim_user = SimulatedUser(
+        persona=scenario["persona"], goal=scenario["goal"], max_turns=scenario["max_turns"]
+    )
+    message = await sim_user.opening_message()
+    reply = ""
+    for _ in range(scenario["max_turns"] + 1):
+        reply = await agent.respond(message)
+        next_message = await sim_user.next_message(reply)
+        if next_message is None:
+            break
+        message = next_message
+    return reply, sim_user.transcript
+
+
+async def process_job(
+    store: MetadataStore, job: SimulationJob, msg: Msg, clickhouse: ClickHouseClient
+) -> None:
     attempt = msg.metadata.num_delivered
     worker_lease = new_worker_lease()
     await store.claim_simulation(job.sim_id, worker_lease, attempt)
@@ -87,6 +126,8 @@ async def process_job(store: MetadataStore, job: SimulationJob, msg: Msg) -> Non
 
         faults_raw = scenario.get("faults")
         faults = [FaultSpec.from_dict(f) for f in json.loads(faults_raw)] if faults_raw else []
+        checks_raw = scenario.get("checks")
+        checks = [CheckSpec.from_dict(c) for c in json.loads(checks_raw)] if checks_raw else []
 
         blob_store = BlobStore()
         recorder = Recorder(store=blob_store, run_id=job.sim_id, agent_name="reference_agent")
@@ -95,14 +136,36 @@ async def process_job(store: MetadataStore, job: SimulationJob, msg: Msg) -> Non
             await real_toolbox.connect(data_dir)
             toolbox = FaultInjectingToolbox(inner=real_toolbox, faults=faults) if faults else real_toolbox
             agent = ReferenceAgent(toolbox, recorder=recorder)
-            reply = await agent.respond(scenario["user_message"])
+            reply, transcript = await run_conversation(agent, scenario)
 
         manifest = recorder.finalize()
+
+        check_results = run_checks(data_dir, checks) if checks else []
+        if check_results:
+            await asyncio.to_thread(clickhouse.insert_check_results, job.sim_id, check_results)
+
+        judge_result = await score_conversation(scenario["persona"], scenario["goal"], transcript)
+        await asyncio.to_thread(
+            clickhouse.insert_judge_score,
+            job.sim_id,
+            judge_result.resolved,
+            judge_result.score,
+            judge_result.rationale,
+            judge_result.model,
+        )
+
         await store.finish_simulation(
             job.sim_id,
             "completed",
             job.sim_id,
-            {"reply": reply, "step_count": manifest["step_count"]},
+            {
+                "reply": reply,
+                "step_count": manifest["step_count"],
+                "checks_passed": sum(1 for r in check_results if r.passed),
+                "checks_total": len(check_results),
+                "judge_resolved": judge_result.resolved,
+                "judge_score": judge_result.score,
+            },
         )
         await msg.ack()
         logger.info("completed sim=%s", job.sim_id)

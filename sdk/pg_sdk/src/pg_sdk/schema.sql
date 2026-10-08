@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS scenarios (
     env_template_id TEXT REFERENCES environment_templates(id),
     faults JSONB NOT NULL DEFAULT '[]',
     checks JSONB NOT NULL DEFAULT '[]',
+    simulated_user BOOLEAN NOT NULL DEFAULT false,
+    max_turns INTEGER NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

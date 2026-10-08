@@ -1059,3 +1059,181 @@ ever becomes a real requirement.
   real regression test (`platform/worker/tests/test_runner.py`) using
   the actual mock-service subprocesses rather than a mock, since a
   mocked MCP connection would not have reproduced the bug at all.
+
+---
+
+## Milestone 8: Evaluation
+
+## 26. State checks: plain SQL assertions against the forked SQLite files, not a bespoke check-type DSL
+
+**Options considered:** A small typed vocabulary of check kinds
+(`refund_issued_once`, `email_sent`, `order_status_is`, ...); a plain
+SQL query against the service's own database file plus an expected
+row.
+
+**Chosen:** The plain-SQL form (`pg_sdk.checks.CheckSpec`: a
+`description`, the target `service`, a `sql` string, `params`, and an
+optional `expect` dict compared against the first returned row).
+
+**Why:** The spec's own example - "refund issued exactly once" - is
+already a one-line SQL query (`SELECT COUNT(*) FROM refunds WHERE
+order_id = ?`) against a schema that's already small, known, and
+fully owned by this project (`services/*/src/*/db.py`). A typed
+vocabulary would need a new case added every time a suite author wants
+to assert something new about any service's state; SQL already covers
+every case that vocabulary would, with no new surface to maintain.
+
+**Cost:** A scenario author needs to know each mock service's schema
+to write a check. Acceptable here since the same project owns both;
+would not scale as-is to a suite author who doesn't control the
+services under test.
+
+## 27. ClickHouse's first real write: raw HTTP (JSONEachRow), not a client library
+
+**Options considered:** `clickhouse-connect` or `clickhouse-driver`
+(dedicated Python clients); ClickHouse's own plain HTTP interface via
+`httpx`, which was already a transitive dependency (`google-genai`
+pulls it in).
+
+**Chosen:** Raw HTTP: `POST /?query=...` for DDL, and `POST
+/?query=INSERT ... FORMAT JSONEachRow` with the rows as the request
+body, for both `check_results` and `judge_scores` - the two tables the
+spec's data model already named back in Milestone 1, never written to
+until now.
+
+**Why:** Both tables see one-shot inserts and the occasional aggregate
+read - not a hot path, and not query-pattern-heavy enough to need a
+driver's connection pooling or native-protocol performance. Avoiding
+the dependency keeps `pg_sdk`'s footprint the same shape it's had
+since Milestone 1 (one storage technology, one plain client each:
+`asyncpg` for Postgres, `boto3` for S3, now `httpx` for ClickHouse).
+
+**Cost:** No query builder, no result-type validation beyond what the
+caller writes by hand; fine at this table count and write volume.
+
+## 28. Simulated user: decides its own stop condition, not recorded or replayed
+
+**Options considered:** A fixed number of turns per scenario; a
+persona that signals for itself, turn by turn, whether its goal has
+been met (`agents/simulated_user`'s `SimulatedUser`, capped by
+`max_turns` only as a safety bound).
+
+**Chosen:** The self-terminating persona. It is explicitly *not* fed
+through `pg_sdk.Recorder`/`Player` the way the agent's own model and
+tool calls are.
+
+**Why:** A fixed turn count forces every multi-turn scenario to either
+pad with filler after the goal is met or cut off before it naturally
+would be - neither produces a realistic transcript. Determinism is a
+property of the *system under test* (the reference agent, already
+fully covered by the recorder/player tape), not of the test harness
+generating realistic input for it; a human tester typing messages
+wouldn't be "replayed" either; the live transcript is what the judge
+scores regardless of whether the exact wording is bit-for-bit
+reproducible on a later run.
+
+**Cost:** A replayed run of a `simulated_user: true` scenario talks to
+a live Gemini-backed persona again, not a tape - the agent's own
+turns still replay deterministically, but the conversation's shape
+(how many turns, what the persona asks) can vary between a recording
+and a later replay. Accepted for the same reason model/key rotation
+state isn't replayed (decision 15): outside the determinism boundary
+this project actually needs.
+
+## 29. Evaluation's own Gemini calling code is separate from the reference agent's
+
+**Options considered:** Extend `reference_agent.agent`'s existing
+client/retry/rotation code to serve `simulated_user` and `judge` too;
+write a second, smaller implementation of the same idea
+(`agents/eval_common/src/eval_common/gemini.py`) just for them.
+
+**Chosen:** The second, smaller implementation - a stateless
+`generate_text(system_instruction, turns)` that tries every (key,
+model) slot with retry, used by both new packages.
+
+**Why:** `reference_agent.agent` is the system under test - already
+working, already covered by its own tests, and carries machinery
+(recorder/player hooks, tool-calling state, `MAX_TOOL_ROUNDS`) that
+evaluation's plain text-in/text-out calls don't need. Reusing it would
+mean either touching tested production code to make it generic enough
+for a second caller, or taking on a dependency from two brand-new
+evaluation packages onto the agent-under-test package - backwards from
+what "the agent is just one thing being evaluated" should look like.
+Evaluation's call volume is also far lower than the agent's own
+tool-calling loop, so a lighter, stateless retry (new client per call,
+no `_rotate_slot` bookkeeping) is enough.
+
+**Cost:** The key-loading regex and the retry/rotation idea are
+duplicated once, in a second, smaller form. Judged worth it for
+keeping the tested agent module untouched.
+
+## 30. Judge output: ask for raw JSON, not function-calling / structured output
+
+**Options considered:** Gemini's structured-output mode (a declared
+response schema); function-calling with a single "submit_verdict" tool
+(the same mechanism the reference agent uses for real tools);
+instructing the model to reply with a bare JSON object and extracting
+the first `{...}` block from the text.
+
+**Chosen:** The bare-JSON instruction + regex extraction
+(`judge.scorer._parse_response`).
+
+**Why:** The judge is a single plain-text call with no tools and no
+multi-turn state - adding either structured-output config or a
+function-calling round trip is machinery this one call doesn't need.
+A model that already produces clean JSON when told to in the system
+instruction (verified live, below) doesn't need a heavier mechanism to
+get there.
+
+**Cost:** Depends on the model actually complying with the
+instruction; `_parse_response` raises on anything that doesn't contain
+a JSON object or has a score outside 1-5, so a genuinely broken
+response surfaces as an exception rather than being silently
+misread - not retried differently from any other judge failure.
+
+---
+
+## Live verification performed (Milestone 8)
+
+- **State checks against a real forked environment**: all three
+  scenarios in `suites/refunds.yaml` (including the new
+  `simulated_user: true` one) ran through the real scheduler → NATS →
+  worker pipeline against the live cluster, each with a real "refund
+  issued exactly once" SQL check against its own forked
+  `payments.db`, written to a real ClickHouse `check_results` row -
+  ClickHouse's first genuine write in this project. All three passed;
+  the check's *failure* path (no matching row) is covered by
+  `sdk/pg_sdk/tests/test_checks.py` directly against a real SQLite
+  file, not mocked.
+- **Simulated user against the real agent and real Gemini API**: the
+  `refund-via-chat` scenario drove a real multi-turn conversation (the
+  persona asked a follow-up, the agent asked for the order id, the
+  persona answered, the agent completed the refund, the persona
+  signalled `DONE`) - 15 recorded steps versus 9 for the single-message
+  scenarios in the same run, confirming the multi-turn path actually
+  exercises more of the agent than a fixed message does. The run also
+  hit real 429s and 503s partway through (free-tier throttling, not
+  injected) and recovered via `eval_common.gemini`'s own key/model
+  rotation - the same resilience pattern built for the reference agent
+  in Milestone 2, now proven in a second, independent implementation.
+- **Judge, calibrated against a small real-transcript set**
+  (`scripts/calibrate_judge.py`): four real transcripts - two plain
+  successes, one a genuine payments-service outage via Milestone 7's
+  own fault injection (`issue_refund` → `error`), one a refund request
+  for an order that doesn't exist - each hand-labelled by reading the
+  agent's actual reply before requesting the judge's verdict, then
+  scored live by the real judge. Result: 4/4 raw agreement, Cohen's
+  kappa = 1.000. Recorded honestly as a *small* sample (`n=4`, one
+  failure mode via real fault injection, one via a bad order id) -
+  not a claim that the judge is reliable in general, just the real,
+  measured number on the set this project actually has. See
+  `docs/BENCHMARKS.md`.
+- **No genuine runtime bug surfaced live this milestone** (the first
+  time that's been true) - one real mistake was caught before it could
+  cause one: `pg_sdk.clickhouse.ClickHouseConfig`'s first draft
+  defaulted to ClickHouse's in-cluster NodePort (30123) instead of the
+  host port kind actually maps it to (28123, per
+  `infra/kind/cluster-config.yaml`'s own `extraPortMappings`) - caught
+  by re-reading that config file before the first live call, not by a
+  failure, so it's noted here rather than under "real bugs found live"
+  to avoid overstating it.
