@@ -1,0 +1,23 @@
+suite:
+  id: small-vip-suite
+  name: Small VIP suite (for the fairness test)
+
+agent_version:
+  id: reference-agent-dev
+  image: reference-agent
+  git_sha: dev
+
+priority: 1
+seeds: [1]
+
+scenarios:
+  - id: vip-lookup-1003
+    persona: VIP customer checking order status
+    goal: Check status of order ord_1003
+    user_message: "What is the status of order ord_1003?"
+    env_template: default
+  - id: vip-lookup-1004
+    persona: VIP customer checking order status
+    goal: Check status of order ord_1004
+    user_message: "What is the status of order ord_1004?"
+    env_template: default

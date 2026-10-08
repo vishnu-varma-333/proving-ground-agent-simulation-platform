@@ -10,6 +10,8 @@ members = [
   "services/email",
   "agents/reference_agent",
   "sdk/pg_sdk",
+  "platform/scheduler",
+  "platform/worker",
 ]
 
 [tool.uv]
@@ -31,4 +33,6 @@ testpaths = [
   "services/email/tests",
   "agents/reference_agent/tests",
   "sdk/pg_sdk/tests",
+  "platform/scheduler/tests",
+  "platform/worker/tests",
 ]

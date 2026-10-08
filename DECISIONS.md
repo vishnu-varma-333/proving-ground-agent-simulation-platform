@@ -729,3 +729,144 @@ None. The one place this could have gone wrong - `heapq` comparing two
 `asyncio.Event` objects on a wake-time tie - was caught by thinking
 through the heap's ordering requirement before writing the code, not by
 hitting the `TypeError` and working backward.
+
+---
+
+## Milestone 6: Distributed engine (in progress)
+
+## 19. Scheduler is a CLI, not a persistent service
+
+**Options considered:** A long-running scheduler daemon that owns suite
+submission and holds in-memory state; a one-shot CLI (`pg run
+suite.yaml`) that submits and optionally polls Postgres for completion,
+then exits.
+
+**Chosen:** The CLI, matching the spec's own description verbatim
+("`pg run suite.yaml` starts a run").
+
+**Why:** Nothing about submitting a suite needs a long-lived process -
+every piece of state that matters (the suite, its scenarios, the run,
+each simulation) lives in Postgres, and every job lives in NATS
+JetStream. A CLI that writes to both and exits is simpler to reason
+about, simpler to test, and matches how a human or CI pipeline actually
+wants to invoke it. The *workers* are the long-running side of this
+system, and they already are.
+
+**Cost:** No in-memory coordination point for cross-run fairness at
+submission time - which turned out not to matter, because fairness was
+moved to the consumer side instead (decision 20).
+
+## 20. Fair scheduling lives on the consumer side, not the producer side
+
+**Options considered:** Interleave publishing across concurrently-
+submitted suites at submission time (requires a shared coordinator -
+contradicts decision 19); one subject per run plus a worker-side
+dispatcher that holds one filtered consumer per active run and cycles
+across them in a weighted round robin.
+
+**Chosen:** The latter (`pg_sdk.FairDispatcher`).
+
+**Why:** JetStream pull consumers deliver strictly in stream order. If
+suite A publishes 1000 jobs before suite B's 3 jobs even exist, no
+amount of consumer-side batching recovers fairness from a single FIFO
+subject - B's 3 jobs are simply behind A's 1000 in the stream, forever.
+Partitioning by run (one subject per run, one stream) means a worker can
+choose which run to pull from next, which is the only point in the
+system where real fairness can be decided without needing scheduler
+processes to coordinate with each other.
+
+**Cost:** One durable JetStream consumer per run, left behind once a run
+finishes unless something calls `delete_run_consumer` - not yet wired
+into the worker's "run has no more pending sims" path. A minor, known
+resource leak (DECISIONS.md said this when `delete_run_consumer` was
+first written); still true, still accepted for now.
+
+## 21. Isolation: a fresh temp directory per simulation, not real forking yet
+
+**Options considered:** Wait until Milestone 7's environment-forking
+machinery exists before building anything that runs more than one
+simulation; give each simulation a brand-new temp directory for the
+mock services' SQLite files, reseeded from scratch every time (no
+forking, no snapshots - more expensive per-simulation than a real fork,
+but still genuinely isolated).
+
+**Chosen:** The temp-directory approach, explicitly as this milestone's
+stand-in for Milestone 7's real mechanism.
+
+**Why:** Milestone 6 needs to prove the *distribution* mechanics - queue,
+lease, retry, fair scheduling, kill tolerance - which don't depend on
+how cheap environment setup is, only on whether it's isolated at all.
+Building the real snapshot-fork system now, before this milestone's own
+mechanics were even proven, would mean debugging two new, large
+subsystems at once instead of one at a time.
+
+**Cost:** Reseeding from scratch is slower than a real fork would be
+(no number measured yet - Milestone 7 is exactly where that comparison
+becomes meaningful). Every simulation observed this milestone used the
+same seed data every time, which is correct for now and will need the
+real `env_template`/snapshot mechanism once scenarios need to start from
+different states.
+
+---
+
+## Real bugs found while building Milestone 6
+
+18. **The worker never loaded `.env.local`.** Unlike the reference-agent
+    CLI, `pg_worker`'s entrypoint had no `load_dotenv()` call at all -
+    every simulation failed immediately with "no Gemini API key set"
+    despite a real key being present in `.env.local`. Caught
+    immediately by the first live run, not by a unit test (nothing
+    about the worker's own logic was wrong; it just never read the file
+    the key lived in). Fixed with one `load_dotenv(".env.local")` call,
+    harmless in a real K8s pod since it never overrides an already-set
+    env var.
+
+19. **`FairDispatcher.refresh()` silently broke its own fairness
+    guarantee.** `refresh()` rebuilt the round-robin cycle AND reset
+    `_cycle_pos` to 0 on every call - and the worker's main loop calls
+    `refresh()` before every single `fetch_one()`, since active runs
+    can change between fetches. The result: rotation never actually
+    advanced across separate fetch calls, so the alphabetically-first
+    run_id (Postgres's `ORDER BY r.id`) would be tried first on *every*
+    fetch and would dominate for as long as it had anything pending -
+    exactly the starvation this whole mechanism exists to prevent,
+    hiding behind code that looked like it implemented round robin.
+    Found by re-reading the code before running the live fairness test,
+    not by the test failing first - fixed, then proven two ways:
+    reverted the fix and confirmed a new regression test
+    (`test_refresh_does_not_reset_rotation_when_the_active_run_set_is_unchanged`)
+    failed exactly as predicted, then restored it and confirmed the
+    test (and the live fairness test afterward) passed.
+
+---
+
+## Live verification performed so far (Milestone 6, still in progress)
+
+- **Full suite submission and processing**: `suites/refunds.yaml`
+  submitted via `pg_scheduler`, both simulations processed by `pg_worker`
+  against the real local cluster (Postgres, NATS JetStream, SeaweedFS),
+  real Gemini API calls, real refunds issued, tapes verified in S3
+  exactly as Milestone 3/4 already proved for a single agent run - now
+  proven through the scheduler/worker path instead of the CLI directly.
+- **Kill test**: hard-killed (`kill -9`) a worker mid-simulation, right
+  after it claimed the job but before any model call. Confirmed in
+  Postgres the simulation sat in `state=running` with the dead worker's
+  lease. Waited past the 15s `ack_wait`, started a second worker, and
+  watched it pick up the same job at `attempt=2` and complete it -
+  `state=completed`, exactly one refund issued for order `ord_1003`, no
+  duplicate. Zero lost or double-counted simulations, the spec's own
+  target metric (Milestone 1's benchmarks table).
+- **Fairness test**: submitted a 6-scenario "big" suite immediately
+  followed by a 2-scenario "small" suite, then ran one persistent
+  worker. Real completion order (verified via Postgres `started_at`
+  timestamps, not just log lines): big, small, big, small, big, big,
+  big, big - both of the small suite's jobs landed in positions 2 and 4
+  of 8, not after the big suite drained. Once the small suite had
+  nothing left pending, the dispatcher correctly stopped including it in
+  the cycle and let the big suite's remaining jobs run back to back.
+
+**Still pending for this milestone:** Kubernetes Job manifests for the
+worker and KEDA ScaledJob autoscaling (the "Kubernetes Jobs, KEDA
+autoscaling" piece of this milestone's own title) - not yet attempted.
+Everything verified above ran as plain host processes against the
+cluster's exposed services, not yet packaged to run inside Kubernetes.

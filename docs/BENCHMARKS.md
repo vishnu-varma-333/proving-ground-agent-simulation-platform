@@ -250,3 +250,50 @@ mechanism - this is the floor that number can't beat, not the ceiling.
 Carried over from Milestones 1-4, plus: virtual time under concurrent
 load (many simulated clocks / many pending timers at once) - meaningless
 before Milestone 6's distributed engine exists to generate that load.
+
+---
+
+## Milestone 6: Distributed engine (in progress)
+
+### Fault tolerance (the spec's own target metric, Milestone 1's table)
+
+**What:** Simulations lost or double-counted when a worker is killed
+mid-run.
+
+**How measured:** One real kill test - submitted a job, started a
+worker, `kill -9`'d it immediately after it claimed the job (before any
+model call), waited past the 15s `ack_wait`, started a second worker,
+and checked the simulation's final Postgres state.
+
+**Result: 0 lost, 0 double-counted, out of 1 kill tested.** The
+simulation completed with `attempt=2` and exactly one refund row for
+the order in question. Target from Milestone 1's table is "0 lost or
+double-counted simulations" - met on this single trial. Not yet
+measured: behavior under *many* concurrent kills, or killing a worker
+mid-model-call rather than right after claiming (both real next steps,
+not done yet).
+
+### Fair scheduling, measured by completion order
+
+**What:** Whether a small suite's jobs complete interleaved with a
+larger suite's, or only after the larger one fully drains.
+
+**How measured:** Submitted a 6-scenario suite, immediately followed by
+a 2-scenario suite (both priority 1), ran one persistent worker, read
+completion order back from Postgres `started_at` timestamps.
+
+**Result:** big, small, big, small, big, big, big, big. The small
+suite's two jobs landed at positions 2 and 4 of 8 - both completed
+before the big suite was even half done, not after it drained. (A first
+attempt at this measurement actually showed zero interleaving - caught
+and fixed a real rotation bug first; see DECISIONS.md bug 19. This
+number is from the run *after* that fix.)
+
+### What's deliberately not benchmarked yet
+
+Carried over from Milestones 1-5, plus: throughput at any real worker
+count (everything above ran one worker at a time - the spec's own
+"simulations per minute at 1/4/16/64 workers" table needs the K8s Job +
+KEDA packaging that's still pending for this milestone), and weighted
+(unequal) priority scheduling - only equal-priority fairness has been
+measured so far.

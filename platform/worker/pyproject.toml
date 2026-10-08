@@ -1,0 +1,20 @@
+[project]
+name = "pg-worker"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "pg-sdk",
+  "reference-agent",
+  "python-dotenv>=1.0",
+]
+
+[tool.uv.sources]
+pg-sdk = { workspace = true }
+reference-agent = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pg_worker"]

@@ -1,0 +1,27 @@
+# A minimal suite: two refund scenarios against the reference agent.
+# "Scenario" here means persona/goal labels plus one driving message -
+# a full multi-turn simulated-user persona is Milestone 8's job.
+suite:
+  id: refunds-suite
+  name: Refund scenarios
+
+agent_version:
+  id: reference-agent-dev
+  image: reference-agent
+  git_sha: dev
+
+priority: 1
+seeds: [1]
+
+scenarios:
+  - id: refund-damaged-mouse
+    persona: Annoyed customer, item arrived damaged
+    goal: Get a refund for order ord_1001
+    user_message: "I'd like a refund for order ord_1001, it arrived damaged."
+    env_template: default
+
+  - id: refund-defective-stand
+    persona: Customer with a defective item
+    goal: Get a refund for order ord_1004
+    user_message: "I'd like a refund for order ord_1004, it's defective."
+    env_template: default

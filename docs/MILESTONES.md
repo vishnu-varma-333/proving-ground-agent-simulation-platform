@@ -385,3 +385,95 @@ a failure.
   *earlier*, then jumps past both at once, and asserts the earlier one
   still resolves first - the heap's correctness under the one way it
   could have been built wrong.
+
+---
+
+## Milestone 6: Distributed engine (in progress)
+
+**Status:** In progress - scheduler/worker/queue mechanics fully built
+and live-verified (including a real kill test and a real fairness
+test); Kubernetes Job + KEDA autoscaling packaging not yet attempted.
+**Started:** 2026-10-08.
+
+**Goal.** Turn the single-agent demo into an actual distributed system:
+a scheduler that turns a suite into queued simulation jobs, a worker
+fleet that pulls them with lease/retry semantics (a crashed worker's job
+is never lost, never double-counted), fair scheduling so one large suite
+can't starve a smaller one, and (still pending) Kubernetes Jobs
+autoscaled by KEDA based on queue depth.
+
+**What got built so far:**
+- **Postgres data model** (`sdk/pg_sdk/src/pg_sdk/schema.sql` +
+  `postgres.py`): `suites`, `scenarios`, `environment_templates`,
+  `agent_versions`, `runs`, `simulations` - the first real use of
+  Postgres in this project (idle since Milestone 1). Raw `asyncpg`, no
+  ORM, matching the mock services' own plain-`sqlite3` style.
+- **A minimal scenario/suite file format** (`platform/scheduler/src/
+  pg_scheduler/suite.py`, YAML) - the first real formalization of
+  "Scenario definitions" (core feature #1), deliberately kept to a
+  persona/goal label plus one driving message; a full multi-turn
+  simulated-user persona is Milestone 8's job.
+- **NATS JetStream job queue** (`pg_sdk/queue.py`): one subject per run
+  under a wildcard stream, `FairDispatcher` holding one filtered pull
+  consumer per active run and cycling across them in a priority-weighted
+  round robin (decision 20) - fairness lives on the consumer side
+  because JetStream's strict per-stream FIFO ordering makes producer-
+  side interleaving unable to recover it once one run has published far
+  ahead of another.
+- **Scheduler CLI** (`pg_scheduler`, decision 19): `pg run suite.yaml`
+  submits a suite's scenarios as jobs, optionally polling Postgres until
+  the run finishes.
+- **Worker** (`pg_worker`): claims a job, gives the simulation a fresh
+  isolated temp directory for the mock services (decision 21 - a
+  deliberate, simpler stand-in for Milestone 7's real environment
+  forking), runs the reference agent with a real `Recorder`, records
+  the result, acks on success or nacks (with a Postgres-tracked retry)
+  on failure up to `max_deliver`. `--once` mode is what will run inside
+  a Kubernetes Job pod; the persistent loop is for local dev.
+- 9 new unit tests for the queue/fairness logic (weighted-cycle math,
+  dispatcher rotation including a regression test for bug 19 below) -
+  52 total across the project, all passing, `ruff check` clean.
+
+**Real bugs found** (full detail in DECISIONS.md):
+18. The worker never called `load_dotenv()` - every simulation failed
+    immediately with "no API key set" despite the key being present.
+19. `FairDispatcher.refresh()` reset the round-robin position on every
+    call, and the worker calls `refresh()` before every fetch - rotation
+    never actually advanced across fetches, so one run would silently
+    dominate forever. Found by re-reading the code before the live test,
+    confirmed by reverting the fix and watching a new regression test
+    fail exactly as predicted, then restored and reverified.
+
+**Live verification performed (not just unit tests):**
+- **End-to-end suite run**: `suites/refunds.yaml` submitted and fully
+  processed through the real scheduler → queue → worker → agent → tape
+  path against the live local cluster - two real refunds issued, both
+  tapes verified in S3.
+- **Kill test** (the spec's own "0 lost or double-counted simulations"
+  target): hard-killed a worker right after it claimed a job, confirmed
+  the simulation sat in `state=running` with the dead worker's lease,
+  waited past the 15s ack-wait, and watched a second worker pick up the
+  same job at `attempt=2` and complete it - exactly one refund issued
+  for order `ord_1003`, zero duplication.
+- **Fairness test**: submitted a 6-scenario suite immediately followed
+  by a 2-scenario suite, ran one persistent worker, and read the real
+  completion order back from Postgres timestamps: big, small, big,
+  small, big, big, big, big - the small suite's two jobs landed in
+  positions 2 and 4 of 8, not stuck behind all six of the big suite's.
+
+**Still pending (not dropped - explicitly not yet attempted):**
+- Kubernetes Job manifests for the worker, parameterized for in-cluster
+  service DNS names (not the host-mapped ports used for this round of
+  local testing).
+- A container image for the worker and a way to get it into the kind
+  cluster - `kind load docker-image` is already known broken on this
+  host (Milestone 1's registry-mirror decision); will need a second,
+  writable local registry alongside the existing pull-through mirror.
+- KEDA installed into the cluster and a `ScaledJob` watching NATS
+  JetStream queue depth.
+- Priorities (the data model and dispatcher already support a priority
+  weight; not yet exercised live with two runs at genuinely different
+  priorities, only equal-priority fairness so far).
+- Cleaning up a finished run's durable JetStream consumer
+  (`delete_run_consumer` exists but isn't called from anywhere yet -
+  decision 20's accepted minor leak).
