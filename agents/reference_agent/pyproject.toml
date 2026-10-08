@@ -1,0 +1,16 @@
+[project]
+name = "reference-agent"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+  "mcp>=1.2",
+  "google-genai>=0.3",
+  "python-dotenv>=1.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reference_agent"]

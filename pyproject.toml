@@ -1,0 +1,30 @@
+[project]
+name = "proving-ground"
+version = "0.1.0"
+requires-python = ">=3.12"
+
+[tool.uv.workspace]
+members = [
+  "services/orders",
+  "services/payments",
+  "services/email",
+  "agents/reference_agent",
+]
+
+[tool.uv]
+dev-dependencies = [
+  "pytest>=8.3",
+  "ruff>=0.7",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = [
+  "services/orders/tests",
+  "services/payments/tests",
+  "services/email/tests",
+  "agents/reference_agent/tests",
+]

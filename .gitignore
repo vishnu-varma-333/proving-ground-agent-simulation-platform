@@ -36,6 +36,8 @@ kubeconfig*
 
 # Local data volumes
 .data/
+data/
+*.db
 
 # AI tooling artifacts — never committed to this repo
 CLAUDE.md

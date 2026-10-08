@@ -214,3 +214,171 @@ Documented here rather than silently fixed, per the project's own rule:
    an expected retry. Left as-is rather than "fixed" with an initContainer
    wait: the retry behavior is the correct Kubernetes-native answer, and
    adding a redundant wait would just be two mechanisms doing one job.
+
+---
+
+## Milestone 2: Reference agent and mock services
+
+## 6. Monorepo as a single uv workspace, one package per service/agent
+
+**Options considered:** One flat Python package for everything; a uv
+workspace with a member package per deployable (orders/payments/email
+services, reference agent); fully separate repos per service.
+
+**Chosen:** A uv workspace (`[tool.uv.workspace]` at the repo root), one
+member under `services/<name>` or `agents/<name>` per deployable, each
+with its own `pyproject.toml` and `src/` layout, sharing one lockfile and
+one `.venv`.
+
+**Why:** Each mock service is genuinely independent (own SQLite file, own
+MCP process, will run as its own container later), so they need their own
+dependency manifests - but they're developed and tested together
+constantly, so a single shared venv and one `uv sync --all-packages` is
+far faster than juggling four separate virtualenvs for a project this
+size. Separate repos would be the wrong trade for a solo portfolio project
+with this much cross-service iteration.
+
+**Cost:** `uv sync` (no flags) only syncs the root project, silently
+skipping every workspace member unless you know to pass
+`--all-packages` - cost real time when the first sync appeared to
+succeed but installed nothing but `pytest`/`ruff` (bug 7 below).
+
+## 7. MCP servers built on `mcp` v2's `MCPServer`, not `FastMCP`
+
+**Options considered:** Pin `mcp<2` to keep using `FastMCP`'s decorator
+API (the version most existing docs/tutorials show); migrate to `mcp` v2's
+`MCPServer` (`FastMCP` renamed and restructured).
+
+**Chosen:** `mcp` v2's `MCPServer` (`from mcp.server.mcpserver import
+MCPServer`), current as of this build.
+
+**Why:** `pyproject.toml` declared `mcp>=1.2` with no upper bound, and `uv
+sync` correctly resolved that to the latest release - v2.3.0 - which had
+already renamed `FastMCP` to `MCPServer` with a restructured API. Pinning
+to `mcp<2` would have meant deliberately building on a superseded API
+just to match older tutorials; adapting to the real current SDK is more
+correct and a better portfolio signal than code that only works because
+of a version pin nobody would otherwise need.
+
+**Cost:** None beyond the one-time migration - the v2 `@mcp.tool()`
+decorator is actually simpler to test with (see bug 8 below): it returns
+the plain function unchanged, instead of v1's `FastMCP` wrapping it in a
+`Tool` object accessed via `.fn`.
+
+## 8. Refund idempotency enforced in the mock service itself
+
+**Options considered:** Let the agent be responsible for checking "have I
+already refunded this?" before calling `issue_refund`; enforce it inside
+`payments_service.issue_refund` with a `UNIQUE(order_id)` constraint on
+the `refunds` table.
+
+**Chosen:** Enforced in the service: a second `issue_refund` call for the
+same order returns the existing refund (`already_refunded: true`) instead
+of creating a duplicate, backed by a real SQL `UNIQUE` constraint, not
+just an application-level check.
+
+**Why:** The spec's own evaluation story (Milestone 8) names "refund
+issued exactly once" as the canonical example of a deterministic state
+check. If that invariant only held because the agent happened to check
+first, it would be the agent's correctness being tested, not the
+platform's ability to catch a violation. Enforcing it at the data layer
+means a buggy or malicious agent that calls `issue_refund` five times
+still can't produce five refunds - the check later milestones run against
+this is actually meaningful.
+
+**Cost:** None found yet. Verified live (not just unit-tested): asking the
+reference agent to refund the same order twice, in two separate
+conversations, produced exactly one `refunds` row both times.
+
+## 9. Gemini as the reference agent's model, with dev-time multi-key rotation
+
+**Options considered:** Anthropic Claude, OpenAI, Gemini; for Gemini
+specifically, a single free-tier key vs. several personal free-tier keys
+rotated on exhaustion vs. paying for one key up front.
+
+**Chosen:** Gemini (`google-genai` SDK, native function calling), with the
+agent able to rotate across multiple `GEMINI_API_KEY_N` keys when one hits
+its daily quota.
+
+**Why:** Gemini Flash-tier pricing is cheap per call, which matters a lot
+once the platform is running thousands of simulations (Milestone 6+) and
+the spec explicitly wants cost measured and reported. Multi-key rotation
+is a pragmatic, time-boxed way to keep building and testing *today*
+without paying anything, using several of the user's own existing Google
+accounts - not a production design: the real cost/throughput story
+belongs to Milestone 3's SDK (model-call layer) and its caching, and the
+free tier's actual daily caps (see bug 10 below) mean this project's real
+goal - thousands of simulations - will need a paid key regardless, before
+any later milestone's throughput numbers mean anything.
+
+**Cost:** Key rotation is dev-only scaffolding that should not be mistaken
+for the platform's real cost-control design. It's isolated to
+`ReferenceAgent.load_api_keys`/`_rotate_key` specifically so it's easy to
+delete or replace once Milestone 3 builds the real model-call layer.
+
+---
+
+## Real bugs found while building Milestone 2
+
+7. **`uv sync` silently installed almost nothing.** With no flags, `uv
+   sync` only syncs the *root* project; every workspace member (all four
+   services/agents) was skipped with no error. `uv sync --all-packages`
+   is required to install the whole workspace together.
+
+8. **`mcp.server.fastmcp.FastMCP` doesn't exist in the installed `mcp`
+   2.3.0** - raises `ModuleNotFoundError` with its own migration-guide
+   link. Root cause: decision 7 above (an unbounded `mcp>=1.2` dependency
+   resolved to the newest major version, which renamed the class).
+
+9. **`sqlite3.Connection.execute()` can only run one SQL statement.**
+   `payments_service`'s schema has two `CREATE TABLE` statements separated
+   by `;`; `conn.execute(SCHEMA)` raised `ProgrammingError: You can only
+   execute one statement at a time`. `orders_service` and `email_service`
+   each have only one table, so the same bug was latent there but never
+   triggered. Fixed by using `executescript()` for any schema with more
+   than one statement.
+
+10. **The reference-agent workspace package's editable install was
+    silently incomplete.** After the *first* `uv sync --all-packages`
+    (run when the package held only an empty `__init__.py`), site-packages
+    had `reference_agent-0.1.0.dist-info` but no `_editable_impl_*.pth`
+    finder - `import reference_agent` raised `ModuleNotFoundError` even
+    though `uv sync` reported success. The other three packages (which
+    already had real modules at that point) got their `.pth` files
+    correctly. Fixed with `uv sync --all-packages --reinstall-package
+    reference-agent` once the real source files existed.
+
+11. **MCP's `Tool.inputSchema` doesn't exist** - the Python SDK exposes it
+    as `tool.input_schema` (snake_case); the wire protocol's camelCase
+    `inputSchema` is a JSON field name, not the Python attribute.
+    `AttributeError: 'Tool' object has no attribute 'inputSchema'. Did you
+    mean: 'input_schema'?` - the SDK's own message named the fix.
+
+12. **`gemini-2.5-flash` is no longer available to new API keys.** The
+    live API's 404 response named the replacement directly:
+    `models/gemini-2.5-flash is no longer available to new users ...
+    use models/gemini-3.8-flash`. Not discoverable without actually
+    calling the API - the SDK accepts any model-name string with no
+    client-side validation.
+
+13. **A naive fixed-schedule retry on 429/503 can hang for 30+ minutes.**
+    First retry implementation used `2**attempt` backoff per attempt
+    with no cap, inside a loop that itself ran up to `MAX_TOOL_ROUNDS` (8)
+    times per `respond()` call. A quota-exhausted free tier's own 429
+    response can suggest waiting up to ~60s *per attempt*; 8 rounds ×
+    several attempts × up to 60s compounds past 30 minutes in the worst
+    case - confirmed live: an early version of the agent was killed by the
+    harness after running silently for the full 30-minute background
+    limit with no output. Fixed by capping any single retry sleep at
+    `MAX_RETRY_DELAY_SECONDS` (20s) regardless of what the server suggests.
+
+14. **The free tier's real cap is 20 requests/*day* per model, not just
+    5/minute.** A `GenerateRequestsPerMinutePerProjectPerModel-FreeTier`
+    429 (5 RPM) was the first limit hit and looked like the whole story;
+    a few calls later, a second, more specific
+    `GenerateRequestsPerDayPerProjectPerModel-FreeTier` 429 appeared with
+    `limit: 20` and `retryDelay: 81400s` (~22.6 hours). No per-minute
+    backoff fixes a per-day cap. Fixed with cross-key rotation (decision
+    9) once a 429's suggested delay exceeds `KEY_EXHAUSTED_THRESHOLD_SECONDS`
+    (120s) - a short delay is treated as transient and retried on the same
+    key, a long one triggers rotation instead of a long sleep.

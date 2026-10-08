@@ -107,3 +107,90 @@ one command, with CI exercising the same bring-up on every push.
   specifically for the self-hosting story and AWS deployment; local dev
   uses plain kustomize manifests for now, repackaged as a chart once there
   is a real app to ship (see DECISIONS.md if/when that happens).
+
+---
+
+## Milestone 2: Reference agent and mock services
+
+**Status:** In progress — core functionality live-verified end-to-end;
+a couple of failure-mode checks still pending (see below).
+**Started:** 2026-10-08.
+
+**Goal.** The first real application code: a customer-support reference
+agent that actually works, backed by three mock services (orders,
+payments, email), each its own MCP server over its own SQLite file so it
+can later be snapshotted and forked (Milestone 7). Nothing here talks to
+the simulation platform yet — the SDK that intercepts an agent's calls to
+record/replay them is Milestone 3; this milestone only needs the agent
+and its tools to work standalone, as the realistic system under test
+everything else will run thousands of scenarios against.
+
+**What got built:**
+- A uv workspace (`services/orders`, `services/payments`, `services/email`,
+  `agents/reference_agent`) sharing one lockfile/venv (decision 6).
+- Three MCP servers (`mcp` v2's `MCPServer`, decision 7), each with its
+  own SQLite file and seed data:
+  - **orders**: `get_order`, `list_orders_by_customer`,
+    `update_order_status`.
+  - **payments**: `get_payment`, `issue_refund` (idempotent — decision 8,
+    backed by a real `UNIQUE(order_id)` constraint, not just an
+    application check), `list_refunds`.
+  - **email**: `send_email` (simulated, just recorded), `list_emails`.
+- `ReferenceAgent` (`agents/reference_agent`): connects to all three MCP
+  servers as real subprocesses, adapts their tool schemas into Gemini
+  function declarations, and runs the tool-calling loop (Gemini via
+  `google-genai`, decision 9) with jittered/bounded retry on transient
+  errors and automatic rotation across multiple API keys when one's quota
+  is exhausted.
+- `scripts/smoke_test_mcp.py`: spins up each MCP server as a real
+  subprocess over real stdio and exercises one real tool call per
+  service — the protocol layer itself, not just the underlying Python
+  functions.
+- 17 unit tests (10 for the three services' DB/tool logic including
+  refund idempotency and rejection paths, 7 for the agent's retry-delay
+  parsing and key-rotation logic) — all passing, `ruff check` clean.
+
+**Real bugs found and fixed** (full detail in DECISIONS.md):
+7. `uv sync` with no flags silently skips every workspace member.
+8. `mcp` v2 renamed `FastMCP` → `MCPServer` — an unbounded `mcp>=1.2`
+   dependency resolved to the new major version.
+9. `sqlite3.Connection.execute()` can't run multi-statement SQL —
+   payments' two-table schema needed `executescript()`.
+10. The reference-agent package's first editable install was silently
+    incomplete (no `.pth` finder) because it was synced before any real
+    module existed.
+11. MCP's `Tool.inputSchema` is actually `tool.input_schema` in the
+    Python SDK.
+12. `gemini-2.5-flash` was deprecated for new API keys mid-build; the
+    live 404 named `gemini-3.8-flash` as the replacement.
+13. A naive fixed-backoff retry compounded across tool-calling rounds and
+    hung for 30+ minutes under real quota exhaustion before being killed.
+14. The Gemini free tier's binding constraint is 20 requests/*day* per
+    model, not just 5/minute — found only by continuing to hit it after
+    "fixing" the per-minute case.
+
+**Live verification performed (not just unit tests):**
+- Real stdio MCP protocol smoke test against all three services
+  (`scripts/smoke_test_mcp.py`): server starts, lists its real tools,
+  answers one real call — PASS on all three.
+- **Full live refund scenario against the real Gemini API**: asked the
+  agent for a refund on a real seeded order. The agent looked up the
+  order, looked up the payment, issued the refund, updated the order
+  status, and sent a confirmation email — all through real tool calls,
+  no mocked model responses. Verified the result wasn't just a plausible-
+  sounding reply by reading the actual SQLite rows afterward: order
+  status `refunded`, payment status `refunded`, exactly one `refunds` row
+  with the correct amount and reason, exactly one email recorded with the
+  right recipient and subject.
+
+**Still pending (not dropped, just blocked on the real external
+constraint found in bug 14 — more API key quota):**
+- Duplicate-refund idempotency *through the full agent* (not just the
+  service layer, which is already unit-tested): ask for the same refund
+  twice in separate conversations, confirm still exactly one `refunds`
+  row. First live attempt hit the free-tier daily quota mid-test.
+- An unknown-order scenario through the full agent (should decline
+  plainly rather than hallucinate order/payment details).
+- A benchmark of real per-call latency and a rough per-scenario cost
+  estimate for `docs/BENCHMARKS.md`, once enough quota is available to
+  measure more than one or two calls without tripping the daily cap.
