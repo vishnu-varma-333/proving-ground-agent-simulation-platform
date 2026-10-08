@@ -1,6 +1,18 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: proving-ground
+# Routes every docker.io pull through a local pull-through registry cache
+# (see scripts/up.sh and DECISIONS.md). `kind load docker-image` was tried
+# first and reliably fails against Docker Desktop's containerd-snapshotter
+# image store ("ctr: content digest ... not found" - a known kind
+# limitation, not a config error on our side); this mirror is kind's own
+# documented workaround and also fixes the real problem (repeat bring-ups
+# re-pulling every image from Docker Hub) more durably than image loading
+# would have.
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."docker.io"]
+      endpoint = ["http://kind-registry-mirror:5000"]
 nodes:
   - role: control-plane
     extraPortMappings:

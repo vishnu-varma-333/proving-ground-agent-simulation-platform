@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  infra:
+    name: Local infra bring-up and health check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kind
+        run: |
+          curl -fsSL -o /usr/local/bin/kind \
+            "https://kind.sigs.k8s.io/dl/v0.25.0/kind-linux-amd64"
+          chmod +x /usr/local/bin/kind
+          kind version
+
+      - name: Install kubectl
+        run: |
+          KUBECTL_VERSION="$(curl -fsSL https://dl.k8s.io/release/stable.txt)"
+          curl -fsSL -o /usr/local/bin/kubectl \
+            "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x /usr/local/bin/kubectl
+          kubectl version --client
+
+      - name: Bring up local stack
+        run: ./scripts/up.sh
+
+      - name: Health check every service
+        run: ./scripts/health-check.sh
+
+      - name: Pod status (debug aid on failure)
+        if: failure()
+        run: kubectl -n proving-ground get pods -o wide && kubectl -n proving-ground get events --sort-by=.lastTimestamp
+
+      - name: Tear down
+        if: always()
+        run: ./scripts/down.sh
