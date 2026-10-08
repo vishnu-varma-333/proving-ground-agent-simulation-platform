@@ -1,0 +1,38 @@
+# Overrides for the EKS cluster infra/aws/terraform provisions. Merge
+# with values.yaml rather than replacing it:
+#
+#   helm install proving-ground infra/helm/proving-ground \
+#     -f infra/helm/proving-ground/values-aws.yaml \
+#     --set images.worker=<worker_ecr_repository_url output>:latest \
+#     --set images.console=<console_ecr_repository_url output>:latest \
+#     --set worker.serviceAccount.roleArn=<worker_irsa_role_arn output> \
+#     --set console.serviceAccount.roleArn=<console_irsa_role_arn output>
+#
+# (image tags and role ARNs come from `terraform output` after apply -
+# real per-deployment values, not something to hardcode here.)
+
+objectStorage:
+  enabled: false # real S3 instead - boto3 falls back to AWS's own endpoints
+  # once PG_S3_ENDPOINT_URL is simply not set (see templates/console.yaml
+  # and templates/worker-scaledjob.yaml's `if .Values.objectStorage.enabled`
+  # guards). Bucket names below must match the Terraform-created buckets
+  # (variables.tf's tapes_bucket_name/snapshots_bucket_name defaults).
+  tapesBucket: proving-ground-tapes
+  snapshotsBucket: proving-ground-snapshots
+
+worker:
+  maxReplicaCount: 64 # ceiling for the scale test (BENCHMARKS.md); KEDA/Cluster
+  # Autoscaler still only add real spot nodes as actual pending Jobs need them.
+  nodeSelector:
+    proving-ground/role: worker
+  tolerations:
+    - key: "proving-ground/role"
+      operator: "Equal"
+      value: "worker"
+      effect: "NoSchedule"
+
+console:
+  serviceType: LoadBalancer # a real external endpoint for the spec's own
+  # "hosted console with a finished demo run" (For recruiters) - not
+  # applied in this session; see this chart's own README and
+  # infra/aws/terraform/README.md for why.

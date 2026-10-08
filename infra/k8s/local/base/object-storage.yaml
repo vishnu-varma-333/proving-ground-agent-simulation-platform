@@ -65,12 +65,20 @@ spec:
             initialDelaySeconds: 15
             periodSeconds: 10
           resources:
+            # 512Mi was enough for this project's normal traffic (one
+            # agent's own tape reads/writes) but OOMKilled repeatedly,
+            # found live, under Milestone 10's scale test - several
+            # concurrent replay-bench workers all reading tapes at once
+            # is real concurrent S3 load this service hadn't seen before,
+            # and SeaweedFS's own master/volume/filer/S3-gateway
+            # processes (all one container here) need real headroom for
+            # it, not just this project's own steady-state usage.
             requests:
               cpu: 100m
               memory: 256Mi
             limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 1Gi
       volumes:
         - name: data
           persistentVolumeClaim:

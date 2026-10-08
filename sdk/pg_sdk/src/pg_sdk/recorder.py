@@ -21,7 +21,7 @@ from typing import Any, Literal
 from pg_sdk.hashing import hash_json
 from pg_sdk.storage import BlobStore
 
-StepKind = Literal["model", "tool", "clock"]
+StepKind = Literal["model", "tool", "clock", "user"]
 
 
 @dataclass(frozen=True)
@@ -76,6 +76,17 @@ class Recorder:
 
     def record_clock_read(self, value: str) -> StepRecord:
         return self._record("clock", "clock", {}, {"value": value})
+
+    def record_user_turn(self, message: str) -> StepRecord:
+        """A simulated_user-generated message (Milestone 8) is itself a
+        non-deterministic input the agent's own request hash depends on -
+        unlike a scenario's fixed user_message (already versioned in
+        Postgres, not generated at record time), it only exists here on
+        this tape, so replay needs it recorded too (the spec's own Step
+        data model already names "user" as one of its four kinds - this
+        was a gap until Milestone 10's replay work noticed Recorder's
+        StepKind only had three)."""
+        return self._record("user", "user", {}, {"message": message})
 
     def finalize(self) -> dict:
         manifest = {

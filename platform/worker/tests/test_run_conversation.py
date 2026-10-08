@@ -65,6 +65,40 @@ async def test_simulated_user_scenario_drives_multiple_turns_until_done(monkeypa
     ]
 
 
+async def test_simulated_user_scenario_records_each_user_turn_when_a_recorder_is_given(monkeypatch):
+    class _FakeRecorder:
+        def __init__(self) -> None:
+            self.recorded: list[str] = []
+
+        def record_user_turn(self, message: str) -> None:
+            self.recorded.append(message)
+
+    scripted_user_turns = iter(
+        [
+            ("Hi, I'd like a refund for ord_1001.", "gemini-flash-lite-latest"),
+            ("DONE", "gemini-flash-lite-latest"),
+        ]
+    )
+
+    async def fake_generate(system, turns):
+        return next(scripted_user_turns)
+
+    monkeypatch.setattr(sim_user_module, "generate_text", fake_generate)
+
+    agent = _FakeAgent(["Sure, what's the order id?"])
+    recorder = _FakeRecorder()
+    scenario = {
+        "simulated_user": True,
+        "persona": "a customer wanting a refund",
+        "goal": "get refunded for ord_1001",
+        "max_turns": 4,
+    }
+
+    await run_conversation(agent, scenario, recorder=recorder)
+
+    assert recorder.recorded == ["Hi, I'd like a refund for ord_1001."]
+
+
 async def test_simulated_user_scenario_stops_at_max_turns_even_if_never_says_done(monkeypatch):
     async def fake_generate(system, turns):
         return "Another message.", "gemini-flash-lite-latest"

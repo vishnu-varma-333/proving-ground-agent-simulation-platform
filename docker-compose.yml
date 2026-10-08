@@ -1,0 +1,145 @@
+# Self-hosting path named in the spec's own "How users access it" section
+# ("docker compose up locally, Helm chart for Kubernetes") - an
+# alternative to infra/kind for anyone who wants the platform's storage
+# and control-plane services running without standing up a Kubernetes
+# cluster at all.
+#
+# Brings up exactly what scripts/up.sh's kind cluster brings up (same
+# images, same credentials, same host ports - PG_POSTGRES_DSN and friends
+# work unchanged against either one) plus the console, built from its own
+# Dockerfile. The scheduler and worker are deliberately NOT containerized
+# here: both are already meant to be run as plain CLI invocations against
+# whichever cluster is up (`pg run suite.yaml`, `python -m pg_worker`),
+# kind or compose, exactly like local development already does - adding
+# a second, compose-specific way to launch them would just be a second
+# code path for the same `uv run` commands this repo already documents.
+#
+#   docker compose up -d
+#   uv run --package pg-scheduler pg run suites/refunds.yaml
+#   uv run --package pg-worker python -m pg_worker
+
+services:
+  postgres:
+    image: postgres:16.4
+    environment:
+      POSTGRES_USER: proving_ground
+      POSTGRES_PASSWORD: proving-ground-local-dev
+      POSTGRES_DB: proving_ground
+    ports:
+      - "25432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proving_ground"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.9
+    environment:
+      CLICKHOUSE_DB: proving_ground
+      CLICKHOUSE_USER: proving_ground
+      CLICKHOUSE_PASSWORD: proving-ground-local-dev
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "28123:8123"
+      - "29000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data", "-p", "4222", "-m", "8222"]
+    ports:
+      - "24222:4222"
+      - "28222:8222"
+    volumes:
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  object-storage:
+    image: chrislusf/seaweedfs:3.97
+    command:
+      - server
+      - -dir=/data
+      - -s3
+      - -s3.port=8333
+      - -master.volumeSizeLimitMB=1000
+    ports:
+      - "29001:8333"
+      - "29002:8888"
+    volumes:
+      - object-storage-data:/data
+    healthcheck:
+      # SeaweedFS's S3 gateway only comes up once its master -> volume ->
+      # filer bootstrap sequence finishes - observed live at ~15-30s, well
+      # past the other services' startup time, so this needs its own
+      # start_period (failures during it don't count toward `retries`,
+      # unlike the other three services here) rather than just more retries.
+      # 127.0.0.1, not localhost: this image's wget resolved "localhost" to
+      # ::1 first and got a plain connection-refused there even once the
+      # (IPv4-only) server was already up and answering on 127.0.0.1 -
+      # confirmed live by `docker compose exec`, not guessed.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8333"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+  object-storage-init:
+    image: amazon/aws-cli:2.17.62
+    depends_on:
+      object-storage:
+        condition: service_healthy
+    environment:
+      AWS_ACCESS_KEY_ID: proving_ground
+      AWS_SECRET_ACCESS_KEY: proving-ground-local-dev
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        aws --endpoint-url http://object-storage:8333 s3 mb s3://proving-ground-tapes || true
+        aws --endpoint-url http://object-storage:8333 s3 mb s3://proving-ground-snapshots || true
+        aws --endpoint-url http://object-storage:8333 s3 ls
+        echo "buckets ready"
+
+  console:
+    build:
+      context: ./console
+    ports:
+      - "3000:3000"
+    environment:
+      PG_POSTGRES_DSN: postgresql://proving_ground:proving-ground-local-dev@postgres:5432/proving_ground
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DB: proving_ground
+      CLICKHOUSE_USER: proving_ground
+      CLICKHOUSE_PASSWORD: proving-ground-local-dev
+      PG_S3_ENDPOINT_URL: http://object-storage:8333
+      PG_S3_BUCKET: proving-ground-tapes
+      PG_S3_ACCESS_KEY_ID: proving_ground
+      PG_S3_SECRET_ACCESS_KEY: proving-ground-local-dev
+      PG_S3_REGION: us-east-1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      object-storage:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  clickhouse-data:
+  nats-data:
+  object-storage-data:

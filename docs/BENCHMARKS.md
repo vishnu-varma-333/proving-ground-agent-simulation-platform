@@ -490,3 +490,88 @@ concurrent users (it's a single-user local dev tool today, nothing to
 measure load against); the replay viewer's cost on a tape with
 hundreds or thousands of steps (only tested up to 15); any number from
 a production (`next start`) server rather than `next dev`.
+
+---
+
+## Milestone 10: Ship it
+
+### Throughput: simulations per minute at 1, 4, 16 and 64 workers
+
+**What:** The spec's own named metric - "report the scaling curve and
+where it flattens." Measured with `scripts/scale_test.py` against the
+real local cluster: a dedicated replay-bench worker
+(`pg_scheduler.replay_bench`) pulls jobs from a real NATS JetStream
+stream and replays an already-recorded tape (`sim_630bbb390c7f0b72`,
+9 steps) through the real `pg_sdk.Player` path - no live model calls,
+so the number reflects this platform's own queue/worker/Kubernetes
+scheduling throughput, not Gemini's free-tier rate limit (which
+dominates at even a handful of concurrent live calls - see Milestone
+2's own quota numbers). See DECISIONS.md decision 37 for why replay
+rather than live scenarios.
+
+**How measured:** `kubectl scale` to exactly N replicas, wait for all
+N `Available`, publish 300 replay jobs, time from first publish to
+every job acked, repeat per worker count. Same kind cluster used
+throughout this project (Docker Desktop, 8 CPUs / 7.75GiB allocated).
+
+| Workers | Simulations/minute |
+| --- | --- |
+| 1 | 1,710.8 |
+| 4 | 1,825.8 |
+| 16 | 324.4 |
+| 64 | not obtained - see below |
+
+**Where the curve actually flattens (the honest finding):** it doesn't
+flatten gracefully - it inverts. 4 workers barely beats 1 (both bound
+by this benchmark's own fixed per-round overhead - `kubectl scale` +
+`wait` + publish, amortized over only 300 jobs); 16 workers is *5.6x
+slower* than 4, a real regression, not noise. Two real, diagnosed
+causes, found live by isolating each one rather than assumed:
+
+1. **A CPU limit on the benchmark worker itself quietly throttled
+   Python's own import-heavy cold start by over 10x** (see
+   DECISIONS.md bug 24) - fixed mid-milestone, reflected in the
+   numbers above.
+2. **At 16+ concurrent replay-bench pods, real contention for this
+   machine's 8 CPUs and ~7.75GiB** (shared with Postgres, ClickHouse,
+   NATS, object storage, Prometheus and Grafana, all already running)
+   measurably slows every pod down at once - not a platform design
+   limit, a single-laptop hardware ceiling.
+
+**64 workers: attempted twice, not obtained - documented honestly
+rather than estimated.** Both attempts produced real, specific
+failures, not a graceful falloff:
+- **Attempt 1:** `object-storage` (SeaweedFS) was OOMKilled
+  (`exit code 137`) under the combined memory pressure of 64
+  concurrent pods, confirmed via `kubectl describe pod`'s own
+  `Last State: Terminated, Reason: OOMKilled`. Its memory limit was
+  raised 512Mi -> 1Gi (`infra/k8s/local/base/object-storage.yaml`) in
+  response - a real fix, since SeaweedFS had never previously seen
+  concurrent read load from more than a handful of clients at once.
+- **Attempt 2**, after that fix: the 64-worker round stalled partway
+  through (confirmed via `nats consumer info`'s own `num_waiting: 0` -
+  no worker was even actively pulling) and a direct Postgres
+  connection attempt from the same machine failed with
+  `ConnectionError: unexpected connection_lost()` - consistent with
+  64 pods' own connection pools (`asyncpg.create_pool(min_size=1,
+  max_size=10)` each) collectively exhausting something between the
+  client and server (Postgres's own `max_connections`, or the node's
+  available sockets/memory) that 16 pods hadn't yet reached.
+
+Stopped there rather than keep forcing it: both failures are specific
+to this machine's real resource ceiling (8 CPUs / 7.75GiB shared
+across the entire cluster, benchmark included), not something this
+project's own code can fix by writing more retry logic around it - the
+same real constraint already documented for Gemini's free-tier quota
+(Milestone 2) applies here to local hardware instead. A real multi-
+node cluster (the Terraform in `infra/aws/terraform`, not applied this
+session) is what would actually answer "does this reach 64" rather
+than "does this laptop have 64 workers' worth of headroom."
+
+### What's deliberately not benchmarked yet
+
+A genuine 64-worker number (needs real multi-node capacity, not this
+single machine); throughput using live scenarios rather than replay
+(would measure Gemini's rate limit, not this platform - see decision
+37); the AWS deployment's own numbers (nothing has been applied there
+this session).

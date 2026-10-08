@@ -756,12 +756,14 @@ source = { editable = "platform/scheduler" }
 dependencies = [
     { name = "pg-sdk" },
     { name = "pyyaml" },
+    { name = "reference-agent" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "pg-sdk", editable = "sdk/pg_sdk" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "reference-agent", editable = "agents/reference_agent" },
 ]
 
 [[package]]

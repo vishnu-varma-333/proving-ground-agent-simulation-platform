@@ -1,9 +1,8 @@
-"""The `pg run` half of the spec's CLI ("pg run suite.yaml starts a
-run"). Submits a suite's scenarios as queued simulation jobs and,
-unless --no-wait is given, polls Postgres until every simulation for
-that run has finished, then reports a summary.
+"""The `pg` CLI (the spec's own two examples):
 
-    uv run --package pg-scheduler python -m pg_scheduler suites/refunds.yaml
+    pg run suites/refunds.yaml              # submit a suite, wait for it to finish
+    pg run suites/refunds.yaml --no-wait     # submit and exit, don't poll for results
+    pg replay <sim-id>                       # reproduce a recorded simulation locally, step by step
 """
 
 from __future__ import annotations
@@ -14,13 +13,14 @@ import sys
 
 from pg_sdk import MetadataStore, apply_schema, connect_js, connect_pool
 
+from pg_scheduler.replay import replay_simulation
 from pg_scheduler.run import submit_suite
 from pg_scheduler.suite import load_suite
 
 POLL_INTERVAL_SECONDS = 1.0
 
 
-async def run(suite_path: str, wait: bool, timeout: float) -> int:
+async def run_suite(suite_path: str, wait: bool, timeout: float) -> int:
     pool = await connect_pool()
     await apply_schema(pool)
     store = MetadataStore(pool)
@@ -52,14 +52,39 @@ async def run(suite_path: str, wait: bool, timeout: float) -> int:
         await pool.close()
 
 
+async def run_replay_command(sim_id: str) -> int:
+    pool = await connect_pool()
+    await apply_schema(pool)
+    store = MetadataStore(pool)
+    try:
+        await replay_simulation(store, sim_id)
+        return 0
+    finally:
+        await pool.close()
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="pg_scheduler")
-    parser.add_argument("suite", help="path to a suite YAML file")
-    parser.add_argument("--no-wait", action="store_true", help="submit and exit, don't poll for results")
-    parser.add_argument("--timeout", type=float, default=120.0, help="max seconds to wait for the run")
+    parser = argparse.ArgumentParser(prog="pg")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    run_parser = subparsers.add_parser("run", help="submit a suite and optionally wait for it")
+    run_parser.add_argument("suite", help="path to a suite YAML file")
+    run_parser.add_argument(
+        "--no-wait", action="store_true", help="submit and exit, don't poll for results"
+    )
+    run_parser.add_argument("--timeout", type=float, default=120.0, help="max seconds to wait")
+
+    replay_parser = subparsers.add_parser(
+        "replay", help="reproduce a recorded simulation locally, step by step"
+    )
+    replay_parser.add_argument("sim_id", help="simulation id to replay")
+
     args = parser.parse_args()
 
-    exit_code = asyncio.run(run(args.suite, wait=not args.no_wait, timeout=args.timeout))
+    if args.command == "run":
+        exit_code = asyncio.run(run_suite(args.suite, wait=not args.no_wait, timeout=args.timeout))
+    else:
+        exit_code = asyncio.run(run_replay_command(args.sim_id))
     raise SystemExit(exit_code)
 
 

@@ -1,3 +1,5 @@
+import json
+
 from pg_sdk.clock import RecordingClock
 from pg_sdk.hashing import content_hash
 from pg_sdk.recorder import Recorder
@@ -80,6 +82,16 @@ def test_clock_read_is_recorded_as_its_own_kind():
     step = recorder._steps[0]
     assert step.kind == "clock"
     assert value  # a real ISO timestamp string was returned to the caller
+
+
+def test_user_turn_is_recorded_as_its_own_kind_with_the_message_as_output():
+    store = FakeBlobStore()
+    recorder = Recorder(store=store, run_id="run-1", agent_name="test-agent")
+
+    step = recorder.record_user_turn("I'd like a refund")
+
+    assert step.kind == "user"
+    assert json.loads(store.blobs[step.output_hash]) == {"message": "I'd like a refund"}
 
 
 def test_finalize_produces_an_ordered_manifest():

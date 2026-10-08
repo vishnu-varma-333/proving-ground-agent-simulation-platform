@@ -1,0 +1,80 @@
+# Defaults match infra/k8s/local exactly - `helm install` with no
+# overrides should behave the same as that hand-applied local setup.
+# values-aws.yaml overrides only what genuinely differs on EKS.
+
+namespace: proving-ground
+
+postgres:
+  image: postgres:16.4
+  user: proving_ground
+  password: proving-ground-local-dev
+  database: proving_ground
+  storage: 2Gi
+
+clickhouse:
+  image: clickhouse/clickhouse-server:24.9
+  user: proving_ground
+  password: proving-ground-local-dev
+  database: proving_ground
+  storage: 4Gi
+
+nats:
+  image: nats:2.10-alpine
+  storage: 4Gi
+
+# Real S3 on AWS (objectStorage.enabled: false there, see values-aws.yaml) -
+# SeaweedFS only exists to stand in for S3 without an AWS account.
+objectStorage:
+  enabled: true
+  image: chrislusf/seaweedfs:3.97
+  storage: 4Gi
+  tapesBucket: proving-ground-tapes
+  snapshotsBucket: proving-ground-snapshots
+
+images:
+  worker: localhost:5002/pg-worker:dev
+  console: localhost:5002/console:dev
+
+console:
+  replicas: 1
+  serviceType: ClusterIP
+  serviceAccount:
+    # Set to an IRSA role ARN on AWS (irsa.tf's console_irsa_role_arn
+    # output); left empty locally, where there's no AWS IAM at all.
+    roleArn: ""
+
+worker:
+  maxReplicaCount: 4
+  pollingInterval: 5
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  serviceAccount:
+    roleArn: ""
+  # Set on AWS to pin worker Jobs onto the spot node group (main.tf's
+  # "workers" eks_managed_node_groups entry has a matching taint) - left
+  # empty locally, where every node is the same kind node.
+  nodeSelector: {}
+  tolerations: []
+
+metricsExporter:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# Literal keys for local dev convenience only - real deployments should
+# populate this Secret out-of-band (scripts/deploy_platform.sh's own
+# imperative `kubectl create secret` from .env.local, or an External
+# Secrets Operator synced from the Secrets Manager secret Terraform
+# creates - secrets.tf's own comment) rather than putting real keys in
+# a values file. Empty here by default; set via --set or a separate,
+# gitignored values-secrets.yaml if you want the chart to manage it.
+workerApiKeys: {}

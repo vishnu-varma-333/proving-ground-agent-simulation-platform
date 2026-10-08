@@ -19,7 +19,7 @@ as a teaching curriculum later.
       fault-injection proxy.
 - [x] **8. Evaluation** — State checks, simulated users, calibrated judges.
 - [x] **9. Console** — Run explorer, replay viewer, version comparison.
-- [ ] **10. Ship it** — AWS deploy on spot nodes, scale and determinism
+- [x] **10. Ship it** — AWS deploy on spot nodes, scale and determinism
       reports, demo video, docs, write-up.
 - [ ] **11. Version 2** — Failure shrinking, production capture, adversarial
       generation.
@@ -754,3 +754,134 @@ platform already writes to, with no separate API service.
   machine.
 - A light theme (deliberately deferred, not forgotten - see decision
   33).
+
+---
+
+## Milestone 10: Ship it
+
+**Status:** Done, scoped with the project owner's explicit input.
+**Started / finished:** 2026-10-08.
+
+**Goal.** The spec's final v1 milestone, broken into what's genuinely
+buildable without real-world consequences and what isn't: AWS
+deployment (Terraform, Helm, spot nodes) costs real money and needs
+credentials nobody handed over, so - confirmed directly with the
+project owner before starting, not decided alone - it's written as
+real, validated infrastructure-as-code and deliberately not applied.
+Everything else (the `pg replay` CLI the spec's access-patterns
+section names, Docker Compose self-hosting, the runbook, the
+determinism-boundary document, a real postmortem, and the scale/
+determinism reports) is built and live-verified in full.
+
+**What got built:**
+- `pg replay <sim-id>` (`platform/scheduler/src/pg_scheduler/
+  {cli,replay}.py`) - the scheduler-level replay command the spec's
+  own CLI section names, restructured `pg`'s argparse into `run`/
+  `replay` subcommands and added a `[project.scripts] pg = ...` entry
+  point. Finding it required fixing a real, spec-named gap first:
+  `pg_sdk.recorder.StepKind` was missing `"user"` (the spec's own Step
+  data model lists `model, tool, user, clock`), so no
+  `simulated_user: true` scenario recorded before this milestone could
+  actually be replayed end to end - every agent step was on the tape,
+  but nothing recorded what the live persona had said to produce them.
+  Fixed (`Recorder.record_user_turn` / `Player.replay_user_turn`),
+  live-verified on a fresh 19-step multi-turn tape: all 19 steps
+  replayed with zero mismatches, no live API, no MCP servers, no
+  network.
+- `docker-compose.yml` + `console/Dockerfile` - the spec's named
+  self-hosting path, same images/credentials/host ports as
+  `scripts/up.sh`'s kind cluster so nothing's connection string
+  changes between the two. Live-verified completely: brought the full
+  stack up, ran a real suite through it, confirmed the containerized
+  console rendered the real result, found and fixed two real bugs
+  (below).
+- `infra/aws/terraform/` - VPC + EKS (community modules, not
+  hand-rolled), two node groups (on-demand system / spot worker,
+  0-desired, taints matching the Helm chart's own tolerations), S3,
+  ECR, Secrets Manager, least-privilege IRSA roles for the worker and
+  console separately, KEDA. `terraform validate` passes. **Not
+  applied** - see DECISIONS.md decision 35.
+- `infra/helm/proving-ground/` - one chart, `values.yaml` (matches
+  local exactly) and `values-aws.yaml` (only the real deltas: real S3,
+  IRSA annotations, spot-node tolerations, a `LoadBalancer` console
+  service). `helm lint`/`helm template` pass; a real
+  `helm install --dry-run=server` against the live kind cluster
+  server-side-validated all 33 resources, including KEDA's own
+  `ScaledJob` CRD (installed fresh this milestone, since the cluster
+  had been recreated since Milestone 6).
+- `docs/DETERMINISM.md` - the spec's own "document stating exactly
+  what is and isn't deterministic," consolidating and extending what
+  had been scattered across several DECISIONS.md entries: what's
+  recorded/replayed and hash-verified (model, tool, clock, and now
+  user-turn steps), and what isn't (model/key rotation state, injected
+  latency, live-run retry jitter, concurrency inside an agent - the
+  spec's own named example).
+- `docs/RUNBOOK.md` - every operational command actually used while
+  building this project, not written speculatively.
+- `docs/POSTMORTEM-fair-dispatcher-starvation.md` - a full postmortem
+  (summary, impact, timeline, root cause, resolution, lessons) on the
+  most severe real bug this project found (Milestone 6's
+  `FairDispatcher` starvation bug), in the format a genuine incident
+  would get.
+- Root `README.md` rewritten from its stale "Milestone 1" status into
+  a real quickstart, scenario-format reference and project map -
+  covering the spec's "Quickstart, scenario reference" docs-site
+  content as thorough markdown rather than standing up a separate
+  docs-site generator (a deliberate scope choice, not an oversight).
+- `scripts/scale_test.py` + `pg_scheduler.replay_bench` - a dedicated,
+  separate benchmark harness (never touches the real simulation
+  pipeline) measuring the platform's own queue/worker/Kubernetes
+  throughput, decoupled from Gemini's rate limit by replaying a tape
+  instead of running live scenarios.
+
+**Real bugs found and fixed:**
+- **A CPU resource limit silently throttled the scale-test worker's
+  cold start by over 10x** (`infra/k8s/local/platform/
+  replay-bench-worker.yaml`) - found by isolating `replay_simulation`'s
+  real cost (~0.1s, measured three independent ways) against the
+  benchmark's actual measured throughput, which didn't add up until
+  the CPU limit itself was the thing timed. Fixed; the same round that
+  took ~65s before took ~4s after, a measured ~15x.
+- **`object-storage` (SeaweedFS) OOMKilled under real concurrent
+  load** it had never seen before (a handful of clients, normally) -
+  its memory limit was a guess (512Mi) rather than a measurement;
+  raised to 1Gi after confirming via `kubectl describe pod`'s own
+  `OOMKilled` reason, not assumed.
+- Two bugs in Docker Compose's own healthchecks, found by actually
+  bringing the stack up rather than trusting the YAML: `localhost`
+  resolved to `::1` first in a minimal image whose server only bound
+  IPv4, and SeaweedFS's own master -> volume -> filer bootstrap
+  (~15-30s) exceeded the default healthcheck retry budget before
+  `start_period` was added.
+
+**Live verification performed (not just written, actually run):**
+- `pg replay` against both a fixed-message tape (existing, zero live
+  calls needed) and a freshly-recorded multi-turn tape (new, to
+  exercise the user-turn fix) - both replayed with zero mismatches.
+- Docker Compose: full stack up, a real suite submitted and processed
+  through it, the containerized console confirmed showing the real
+  result - not just "the containers started."
+- Terraform: `init`, `validate` (no AWS credentials needed for
+  either - module/provider resolution and HCL correctness only).
+- Helm: `lint`, `template` against both value sets, and a real
+  `--dry-run=server` against the live cluster.
+- The scale test: see docs/BENCHMARKS.md for the full numbers and the
+  honestly-documented 64-worker hardware ceiling, including the exact
+  failure evidence (OOMKilled, a dropped Postgres connection) rather
+  than a faked or silently-omitted number.
+
+**Still pending, deliberately left for later (confirmed with the
+project owner, not quietly dropped):**
+- The actual `terraform apply` / AWS deployment, the hosted recruiter
+  console and the demo video - all blocked on the same real
+  constraint (AWS credentials + real spend, confirmed before this
+  milestone started rather than assumed).
+- A genuine 64-worker throughput number - needs real multi-node
+  capacity this single machine doesn't have; the exact same
+  `scripts/scale_test.py` is what would measure it once that capacity
+  exists.
+- Production-to-the-letter network egress restriction ("no outbound
+  network except approved model endpoints") - a security-group port
+  rule can't actually enforce a domain allowlist; the real fix (AWS
+  Network Firewall or equivalent) is named as a specific, honest gap
+  in `infra/aws/terraform/README.md` rather than approximated.

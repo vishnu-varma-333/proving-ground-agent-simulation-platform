@@ -75,14 +75,24 @@ async def ensure_template(template_id: str) -> Path:
 
 
 async def run_conversation(
-    agent: ReferenceAgent, scenario: dict
+    agent: ReferenceAgent, scenario: dict, recorder: Recorder | None = None
 ) -> tuple[str, list[dict[str, str]]]:
     """Drives either the original fixed single-message scenario, or
     (Milestone 8) a multi-turn simulated_user persona that reacts to the
     agent's replies until it decides its goal is met or max_turns is
     hit. Returns the agent's final reply and the full transcript (used
     by the judge below) in the same [{"role", "text"}, ...] shape
-    either way."""
+    either way.
+
+    A fixed scenario's user_message is already a versioned Postgres
+    column, not something generated at record time, so it isn't also
+    written to the tape. A simulated_user's messages ARE generated live
+    (by a second, independent Gemini call - agents/simulated_user) and
+    exist nowhere else, so each one is recorded as its own "user" step
+    when `recorder` is given - otherwise replay could reproduce the
+    agent's own model/tool/clock steps exactly and still have no way to
+    know what the persona actually said to drive them (Milestone 10
+    found this gap while building `pg replay`)."""
     if not scenario.get("simulated_user"):
         user_message = scenario["user_message"]
         reply = await agent.respond(user_message)
@@ -94,6 +104,8 @@ async def run_conversation(
     message = await sim_user.opening_message()
     reply = ""
     for _ in range(scenario["max_turns"] + 1):
+        if recorder is not None:
+            await asyncio.to_thread(recorder.record_user_turn, message)
         reply = await agent.respond(message)
         next_message = await sim_user.next_message(reply)
         if next_message is None:
@@ -136,7 +148,7 @@ async def process_job(
             await real_toolbox.connect(data_dir)
             toolbox = FaultInjectingToolbox(inner=real_toolbox, faults=faults) if faults else real_toolbox
             agent = ReferenceAgent(toolbox, recorder=recorder)
-            reply, transcript = await run_conversation(agent, scenario)
+            reply, transcript = await run_conversation(agent, scenario, recorder=recorder)
 
         manifest = recorder.finalize()
 

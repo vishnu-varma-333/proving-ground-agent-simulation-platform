@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars (already gitignored - never commit real
+# values here) and fill in before a real `terraform apply`.
+
+aws_region   = "us-east-1"
+cluster_name = "proving-ground"
+
+gemini_api_keys = [
+  "put-a-real-key-here",
+]

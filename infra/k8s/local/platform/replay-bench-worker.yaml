@@ -1,0 +1,58 @@
+# Milestone 10's scale test only (scripts/scale_test.py,
+# docs/BENCHMARKS.md) - NOT part of the real simulation pipeline. A
+# plain Deployment, not a KEDA ScaledJob: the benchmark's own
+# methodology is "run with exactly N workers, measure throughput, repeat
+# for each N" (the spec's "simulations per minute at 1, 4, 16 and 64
+# workers"), so scripts/scale_test.py sets `replicas` directly via
+# `kubectl scale` rather than letting KEDA autoscale it dynamically -
+# autoscaling would measure KEDA's own reaction time, not the fixed-N
+# throughput number the benchmark table asks for.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: replay-bench-worker
+  namespace: proving-ground
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: replay-bench-worker
+  template:
+    metadata:
+      labels:
+        app: replay-bench-worker
+    spec:
+      containers:
+        - name: replay-bench-worker
+          image: localhost:5002/pg-worker:dev
+          imagePullPolicy: Always # this manifest is actively iterated on during benchmarking;
+          # the default IfNotPresent would silently keep running a stale cached image
+          # under the same :dev tag after a rebuild.
+          command: ["python", "-m", "pg_scheduler.replay_bench"]
+          env:
+            - name: PG_POSTGRES_DSN
+              value: "postgresql://proving_ground:proving-ground-local-dev@postgres:5432/proving_ground"
+            - name: PG_NATS_URL
+              value: "nats://nats:4222"
+            - name: PG_S3_ENDPOINT_URL
+              value: "http://object-storage:8333"
+          resources:
+            # A tight CPU limit here turned out to badly throttle Python's
+            # own import-heavy cold start (google-genai, MCP, boto3, grpc
+            # deps) - found live by comparing replay_simulation's real,
+            # fast steady-state cost (~0.1s, measured standalone and via
+            # kubectl exec inside a pod) against this worker's actual
+            # measured throughput, which didn't account for all of it.
+            # CPU matches pg-worker's own real-traffic profile; memory is
+            # right-sized from a real measurement instead (a pod's own
+            # cgroup memory.current read ~81Mi at steady state) - the
+            # original 256Mi guess meant 64 replicas alone would request
+            # 16Gi, more than this machine's entire Docker Desktop
+            # allocation (7.75Gi), confirmed live by 64-replica scheduling
+            # actually failing ("Insufficient memory") before this fix.
+            requests:
+              cpu: 100m
+              memory: 100Mi
+            limits:
+              cpu: 500m
+              memory: 200Mi

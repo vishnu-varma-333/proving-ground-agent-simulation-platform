@@ -1432,3 +1432,112 @@ would, with less code.
   runs of the same suite, not just a UI check.
 - `npm run build` (production build, not just the dev server) compiles
   clean with no type errors.
+
+---
+
+## Milestone 10: Ship it
+
+## 35. AWS deployment is written, not applied
+
+**Options considered:** Apply the Terraform/Helm and actually stand up
+EKS, spot capacity, a hosted console; write every piece of it as real,
+reviewable infrastructure-as-code and stop short of a real
+`terraform apply`.
+
+**Chosen:** The latter - explicitly confirmed with the project owner
+before starting this milestone (see AskUserQuestion exchange at the
+start of Milestone 10) rather than decided unilaterally.
+
+**Why:** Provisioning a real EKS cluster and spot capacity costs real
+money on a real AWS account, and this project's own standing rules
+treat exactly this kind of action - hard to reverse, costs money,
+needs credentials nobody has handed over - as something to confirm
+first, not assume. Writing the Terraform/Helm as genuine, validated
+code (`terraform validate` passes; `helm lint`/`helm template` pass;
+`helm install --dry-run=server` against the real local cluster
+renders and server-side-validates all 33 resources, including the
+KEDA `ScaledJob` CRD) is itself a complete, honest deliverable for
+"AWS deploy on spot nodes" as a piece of engineering - a real
+`apply`'s only remaining value is proving the exact same YAML/HCL
+also works against a different control plane, which `--dry-run=server`
+already substantially establishes given EKS and kind both speak the
+same Kubernetes API.
+
+**Cost:** No real AWS deployment exists; the spec's own "hosted console
+with a finished demo run" recruiter deliverable and the demo video
+remain blocked on this exact same decision. Documented as a real,
+named gap (docs/MILESTONES.md) rather than implied to be done.
+
+## 36. docker-compose uses the exact same host ports as the kind setup
+
+**Options considered:** Standard default ports (5432, 8123, 4222, ...)
+for `docker-compose.yml`, on the theory that a self-hosting user
+probably isn't running `kind` at the same time anyway; the same
+non-standard host ports `scripts/up.sh`'s kind cluster already uses
+(25432, 28123, 24222, 29001, ...).
+
+**Chosen:** The same ports.
+
+**Why:** Every connection string this project already has (`pg_sdk`'s
+own defaults, `console/.env.local`, every doc that says "localhost:
+25432") then works unchanged regardless of which backend is actually
+running - someone switching from kind-based local dev to Docker
+Compose self-hosting (or vice versa) changes zero configuration.
+
+**Cost:** The two can never run at once - confirmed live while testing
+(`docker compose up` failed until the kind cluster's own container was
+stopped first). Acceptable: nothing about self-hosting implies running
+both the "I'm developing this project" cluster and the "I'm trying
+this project out" cluster simultaneously on the same machine.
+
+## 37. The scale test replays a tape instead of running live scenarios
+
+**Options considered:** Run real scenarios (live Gemini calls) at each
+worker count to measure "simulations per minute"; replay an already-
+recorded tape repeatedly through the real queue/worker/Kubernetes path
+instead, with a dedicated replay-bench worker
+(`pg_scheduler.replay_bench`) kept deliberately separate from the real
+`pg_worker.runner.process_job`.
+
+**Chosen:** Replay, through dedicated (but still real) infrastructure.
+
+**Why:** Gemini's free-tier rate limit is the dominant cost at even a
+handful of concurrent live calls (observed repeatedly since Milestone
+2) - a live-call version of this benchmark at 16 or 64 concurrent
+workers would measure Google's throttling, not this platform's own
+scheduling/orchestration ceiling, which is what the spec's own metric
+("simulations per minute... report the scaling curve and where it
+flattens") is actually asking about. Replaying is real work for the
+exact path being measured - claim a queue message, schedule a pod,
+run the real agent against a tape, ack - with no external rate limit
+in the loop. Kept as a separate worker/script rather than a "replay
+mode" branch inside `process_job` so benchmark-only code never risks
+the correctness-critical real simulation path.
+
+**Cost:** Doesn't measure live-call latency's contribution to
+real-world throughput (a real simulation's wall-clock time is
+dominated by Gemini round trips, not orchestration overhead) - this
+benchmark is specifically "how fast can the platform schedule and run
+work," not "how fast can a full live simulation complete." Both are
+real numbers; this milestone only measures the former, honestly
+scoped as such in docs/BENCHMARKS.md.
+
+## Real bugs found while building Milestone 10
+
+24. **`FairDispatcher` wasn't involved, but a CPU resource limit
+    quietly throttled the scale-test worker's own cold start by over
+    10x.** `replay-bench-worker`'s first resource limits (25m request /
+    100m CPU limit) were a guess, not a measurement - and Python's own
+    import of `google-genai`, the MCP SDK and their transitive
+    dependencies turned out to need real CPU to finish in reasonable
+    time. Found live by isolating the cost three ways before touching
+    the limits: `replay_simulation` timed standalone (~0.02-0.1s per
+    call, both on the host and via `kubectl exec` inside a pod), the
+    NATS pull-fetch loop timed directly (sub-millisecond), and S3/
+    Postgres calls timed individually (all fast) - none of which
+    explained the ~10s/replay the actual scale-test round measured.
+    Raising the limit to match `pg-worker`'s own real-traffic profile
+    (100m/500m) dropped the measured time for the same 40-replay round
+    from ~65s to ~4s - roughly 15x, confirming the limit, not anything
+    about NATS/S3/Postgres/replay itself, was the real bottleneck.
+    `infra/k8s/local/platform/replay-bench-worker.yaml`.

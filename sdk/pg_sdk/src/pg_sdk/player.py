@@ -113,3 +113,30 @@ class Player:
 
     def replay_clock_read(self) -> str:
         return self._next("clock", "clock", {})["value"]
+
+    @property
+    def next_step_kind(self) -> str | None:
+        """None once the tape is exhausted. Lets a caller driving a
+        multi-turn conversation (Milestone 8's simulated_user) ask
+        "is there another user turn recorded?" without consuming it -
+        the tape itself is the only record of how many turns a replayed
+        conversation had, since that was the live persona's own call at
+        record time, not a scenario parameter."""
+        return None if self.finished else self._steps[self._cursor]["kind"]
+
+    def replay_user_turn(self) -> str:
+        """Unlike the other replay_* methods, there's no request to
+        recompute and hash-check here - a recorded user turn IS the
+        input, not a response to one, so this only enforces step order
+        (TapeOrderMismatch), not a ReplayMismatch."""
+        if self.finished:
+            raise TapeExhausted(
+                f"replay ran out of tape at seq {self._cursor} "
+                f"(run {self.run_id!r} recorded {len(self._steps)} steps)"
+            )
+        step = self._steps[self._cursor]
+        if step["kind"] != "user" or step["name"] != "user":
+            raise TapeOrderMismatch(self._cursor, (step["kind"], step["name"]), ("user", "user"))
+        output = json.loads(self.store.get_blob(step["output_hash"]))
+        self._cursor += 1
+        return output["message"]

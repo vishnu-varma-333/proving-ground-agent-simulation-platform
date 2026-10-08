@@ -1,0 +1,64 @@
+# Requires KEDA already installed in the cluster (infra/aws/terraform/
+# keda.tf on EKS; `helm install keda kedacore/keda -n keda-system
+# --create-namespace` locally) - same ScaledJob shape as infra/k8s/
+# local/platform/worker-scaledjob.yaml, templated for image/resources/
+# node placement instead of hand-edited per environment.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledJob
+metadata:
+  name: pg-worker
+  namespace: {{ .Values.namespace }}
+spec:
+  jobTargetRef:
+    backoffLimit: 1
+    template:
+      spec:
+        serviceAccountName: pg-worker
+        restartPolicy: Never
+        {{- if .Values.worker.nodeSelector }}
+        nodeSelector:
+          {{- toYaml .Values.worker.nodeSelector | nindent 10 }}
+        {{- end }}
+        {{- if .Values.worker.tolerations }}
+        tolerations:
+          {{- toYaml .Values.worker.tolerations | nindent 10 }}
+        {{- end }}
+        containers:
+          - name: worker
+            image: {{ .Values.images.worker }}
+            args: ["--once", "--once-timeout", "20"]
+            {{- if .Values.workerApiKeys }}
+            envFrom:
+              - secretRef:
+                  name: worker-api-keys
+            {{- end }}
+            env:
+              - name: PG_POSTGRES_DSN
+                value: "postgresql://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@postgres:5432/{{ .Values.postgres.database }}"
+              - name: PG_NATS_URL
+                value: "nats://nats:4222"
+              - name: PG_S3_BUCKET
+                value: {{ .Values.objectStorage.tapesBucket | quote }}
+              {{- if .Values.objectStorage.enabled }}
+              - name: PG_S3_ENDPOINT_URL
+                value: "http://object-storage:8333"
+              {{- end }}
+            resources:
+              {{- toYaml .Values.worker.resources | nindent 14 }}
+  pollingInterval: {{ .Values.worker.pollingInterval }}
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  maxReplicaCount: {{ .Values.worker.maxReplicaCount }}
+  minReplicaCount: 0
+  scalingStrategy:
+    strategy: default
+  triggers:
+    - type: prometheus
+      metadata:
+        # Must be fully-qualified: KEDA's operator runs in keda-system,
+        # not this namespace, and a bare "prometheus" service name
+        # doesn't resolve for it (confirmed live, Milestone 6).
+        serverAddress: http://prometheus.{{ .Values.namespace }}.svc.cluster.local:9090
+        metricName: pg_pending_simulations
+        query: pg_pending_simulations
+        threshold: "1"

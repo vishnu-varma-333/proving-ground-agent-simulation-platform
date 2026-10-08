@@ -1,0 +1,13 @@
+apiVersion: v2
+name: proving-ground
+description: >
+  Proving Ground: Postgres, ClickHouse, NATS JetStream, the console, the
+  worker fleet (KEDA ScaledJob) and the metrics exporter. One chart for
+  both the local kind cluster (infra/k8s/local's own raw manifests are
+  the original, hand-applied version of the same services - this chart
+  is the spec's named "Helm chart for services," meant to replace that
+  for any real deployment, kind or AWS) and the AWS/EKS path
+  (infra/aws/terraform provisions the cluster this installs onto).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

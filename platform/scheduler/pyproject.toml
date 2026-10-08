@@ -5,10 +5,15 @@ requires-python = ">=3.12"
 dependencies = [
   "pg-sdk",
   "pyyaml>=6.0",
+  "reference-agent",
 ]
 
 [tool.uv.sources]
 pg-sdk = { workspace = true }
+reference-agent = { workspace = true }
+
+[project.scripts]
+pg = "pg_scheduler.cli:main"
 
 [build-system]
 requires = ["hatchling"]

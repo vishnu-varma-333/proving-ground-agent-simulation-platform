@@ -1,0 +1,101 @@
+{{- if .Values.objectStorage.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: object-storage-data
+  namespace: {{ .Values.namespace }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: {{ .Values.objectStorage.storage }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: object-storage
+  namespace: {{ .Values.namespace }}
+spec:
+  serviceName: object-storage
+  replicas: 1
+  selector:
+    matchLabels:
+      app: object-storage
+  template:
+    metadata:
+      labels:
+        app: object-storage
+    spec:
+      containers:
+        - name: seaweedfs
+          image: {{ .Values.objectStorage.image }}
+          args:
+            - server
+            - -dir=/data
+            - -s3
+            - -s3.port=8333
+            - -master.volumeSizeLimitMB=1000
+          ports:
+            - containerPort: 8333
+              name: s3
+            - containerPort: 8888
+              name: filer
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            tcpSocket:
+              port: 8333
+            initialDelaySeconds: 15
+            periodSeconds: 5
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: object-storage-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: object-storage
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: object-storage
+  ports:
+    - name: s3
+      port: 8333
+      targetPort: 8333
+    - name: filer
+      port: 8888
+      targetPort: 8888
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: object-storage-create-buckets
+  namespace: {{ .Values.namespace }}
+spec:
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: aws-cli
+          image: amazon/aws-cli:2.17.62
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              value: {{ .Values.postgres.user | quote }}
+            - name: AWS_SECRET_ACCESS_KEY
+              value: {{ .Values.postgres.password | quote }}
+            - name: AWS_DEFAULT_REGION
+              value: "us-east-1"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              aws --endpoint-url http://object-storage:8333 s3 mb s3://{{ .Values.objectStorage.tapesBucket }} || true
+              aws --endpoint-url http://object-storage:8333 s3 mb s3://{{ .Values.objectStorage.snapshotsBucket }} || true
+              aws --endpoint-url http://object-storage:8333 s3 ls
+              echo "buckets ready"
+{{- end }}

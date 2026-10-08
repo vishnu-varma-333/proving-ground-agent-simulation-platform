@@ -21,6 +21,8 @@ out/
 *.tfstate.*
 *.tfplan
 .terraform.lock.hcl
+*.tfvars
+!*.tfvars.example
 
 # Kubeconfig / local secrets
 kubeconfig*

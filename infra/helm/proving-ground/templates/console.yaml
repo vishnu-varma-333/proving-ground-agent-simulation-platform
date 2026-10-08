@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: console
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: {{ .Values.console.replicas }}
+  selector:
+    matchLabels:
+      app: console
+  template:
+    metadata:
+      labels:
+        app: console
+    spec:
+      serviceAccountName: console
+      containers:
+        - name: console
+          image: {{ .Values.images.console }}
+          ports:
+            - containerPort: 3000
+          env:
+            - name: PG_POSTGRES_DSN
+              value: "postgresql://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@postgres:5432/{{ .Values.postgres.database }}"
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse:8123"
+            - name: CLICKHOUSE_DB
+              value: {{ .Values.clickhouse.database | quote }}
+            - name: CLICKHOUSE_USER
+              value: {{ .Values.clickhouse.user | quote }}
+            - name: CLICKHOUSE_PASSWORD
+              value: {{ .Values.clickhouse.password | quote }}
+            - name: PG_S3_BUCKET
+              value: {{ .Values.objectStorage.tapesBucket | quote }}
+            {{- if .Values.objectStorage.enabled }}
+            - name: PG_S3_ENDPOINT_URL
+              value: "http://object-storage:8333"
+            - name: PG_S3_ACCESS_KEY_ID
+              value: {{ .Values.postgres.user | quote }}
+            - name: PG_S3_SECRET_ACCESS_KEY
+              value: {{ .Values.postgres.password | quote }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: console
+  namespace: {{ .Values.namespace }}
+spec:
+  type: {{ .Values.console.serviceType }}
+  selector:
+    app: console
+  ports:
+    - port: 3000
+      targetPort: 3000

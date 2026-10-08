@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: metrics-exporter
+  namespace: {{ .Values.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: metrics-exporter
+  template:
+    metadata:
+      labels:
+        app: metrics-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9108"
+    spec:
+      containers:
+        - name: metrics-exporter
+          image: {{ .Values.images.worker }}
+          command: ["python", "-m", "pg_worker.metrics_exporter"]
+          env:
+            - name: PG_POSTGRES_DSN
+              value: "postgresql://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@postgres:5432/{{ .Values.postgres.database }}"
+          ports:
+            - containerPort: 9108
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 9108
+            initialDelaySeconds: 3
+          resources:
+            {{- toYaml .Values.metricsExporter.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: metrics-exporter
+  namespace: {{ .Values.namespace }}
+spec:
+  selector:
+    app: metrics-exporter
+  ports:
+    - port: 9108
+      targetPort: 9108

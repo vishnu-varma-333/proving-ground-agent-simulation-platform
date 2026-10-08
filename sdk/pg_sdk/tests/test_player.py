@@ -93,6 +93,40 @@ def test_replay_clock_read_returns_the_recorded_value():
     assert player.replay_clock_read() == "2026-01-01T00:00:00+00:00"
 
 
+def test_replay_user_turn_returns_the_recorded_message():
+    store = FakeBlobStore()
+    recorder = Recorder(store=store, run_id="run-4", agent_name="test-agent")
+    recorder.record_user_turn("Hi, I need a refund for ord_1001")
+    recorder.record_model_call("gemini", {"prompt": "hi"}, {"text": "hello"})
+    recorder.finalize()
+
+    player = Player(store, "run-4")
+    assert player.replay_user_turn() == "Hi, I need a refund for ord_1001"
+    assert player.replay_model_call("gemini", {"prompt": "hi"}) == {"text": "hello"}
+
+
+def test_replay_user_turn_raises_order_mismatch_when_next_step_isnt_a_user_turn():
+    store = FakeBlobStore()
+    _recorded_run(store, run_id="run-5")
+    player = Player(store, "run-5")
+
+    with pytest.raises(TapeOrderMismatch):
+        player.replay_user_turn()
+
+
+def test_next_step_kind_reports_without_consuming():
+    store = FakeBlobStore()
+    recorder = Recorder(store=store, run_id="run-6", agent_name="test-agent")
+    recorder.record_user_turn("hi")
+    recorder.finalize()
+
+    player = Player(store, "run-6")
+    assert player.next_step_kind == "user"
+    assert player.next_step_kind == "user"  # calling it again must not advance the cursor
+    player.replay_user_turn()
+    assert player.next_step_kind is None  # tape exhausted
+
+
 def test_player_reads_manifest_fresh_not_sharing_recorder_state():
     """Player only ever talks to the store, never to the Recorder object
     that produced the tape - this proves replay genuinely doesn't depend
