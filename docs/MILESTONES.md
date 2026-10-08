@@ -12,7 +12,7 @@ as a teaching curriculum later.
       calls and clock reads; tapes written to S3(-compatible storage).
 - [x] **4. Deterministic replay** — Replay from tape; determinism test suite
       passing.
-- [ ] **5. Virtual time** — Simulated clock driving timers and waits.
+- [x] **5. Virtual time** — Simulated clock driving timers and waits.
 - [ ] **6. Distributed engine** — Scheduler, NATS queue, worker leases,
       retries, Kubernetes Jobs, KEDA autoscaling. Kill tests.
 - [ ] **7. Snapshots and faults** — Environment forking and the
@@ -332,3 +332,56 @@ failure afterward.
   hash 936cc96de17e... but replay recomputed 1f701a8ca2bf...` - exactly
   the negative-test proof a determinism checker needs: a real deviation
   is caught, named, and located, not silently accepted.
+
+---
+
+## Milestone 5: Virtual time
+
+**Status:** Done, live-verified. **Started / finished:** 2026-10-08.
+
+**Goal.** The mechanism behind "a three-day scenario finishes in
+seconds" (the project's own one-line pitch): a simulated clock that only
+moves when told to, so anything waiting on it resolves the moment the
+simulation decides to jump forward - not after real wall-clock time
+actually passes. Scoped deliberately to the SDK primitive itself this
+milestone, not retrofitted into the reference agent's own domain (which
+has no honest reason to wait three days mid-conversation) - see
+decision 18.
+
+**What got built:**
+- `pg_sdk.SimulatedClock` (`sdk/pg_sdk/src/pg_sdk/clock.py`): `now()`
+  returns virtual time; `advance(seconds)` moves it forward and releases
+  every pending `sleep()` whose deadline has been reached; nothing moves
+  on its own. Timer ordering (decision 17) via a min-heap keyed on
+  `(wake_time, insertion_sequence)` - ties broken by registration order,
+  not arbitrarily.
+- `pg_sdk.RealClock`: the real-wall-time behavior Milestones 3-4 used
+  directly, now named and pluggable rather than hardcoded.
+- `RecordingClock` takes an optional `clock` (default `RealClock()`) -
+  fully backward compatible with every existing call site; nothing in
+  `reference_agent` needed to change.
+- `scripts/benchmark_virtual_time.py`: a standalone, real measurement of
+  the actual claim (see docs/BENCHMARKS.md).
+- 8 new unit tests (`test_clock.py`): real-clock sanity, simulated time
+  not moving on its own, sleep blocking until the right `advance()`,
+  the 72-hour-wait-in-milliseconds claim itself as a unit test, and two
+  ordering tests that specifically try to break the heap (register a
+  later-waking timer first; register two timers with the identical
+  deadline) - 43 total across the project, all passing, `ruff check`
+  clean.
+
+**Real bugs found:** none - the one real risk (`heapq` comparing two
+`asyncio.Event` objects on a tied wake time, which has no defined
+ordering) was designed around before it could happen, not discovered as
+a failure.
+
+**Live verification performed (not just unit tests):**
+- **`scripts/benchmark_virtual_time.py`, run 5 times**: a simulated
+  72-hour wait resolved in 0.077-0.087ms of real wall-clock time every
+  time - consistent, not a one-off fluke. Exact numbers and methodology
+  in docs/BENCHMARKS.md.
+- **Ordering proven adversarially, not just happy-path**: one test
+  registers the timer that wakes *later* before the one that wakes
+  *earlier*, then jumps past both at once, and asserts the earlier one
+  still resolves first - the heap's correctness under the one way it
+  could have been built wrong.

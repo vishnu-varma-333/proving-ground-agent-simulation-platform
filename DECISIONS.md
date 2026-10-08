@@ -629,3 +629,103 @@ have hidden (the request-dict-building code diverging between the
 record and replay code paths) was avoided by having `_call_model` build
 that dict once, before branching into either path, rather than once in
 each.
+
+---
+
+## Milestone 5: Virtual time
+
+## 16. Clock injection through the SDK, not OS-level time faking
+
+**Options considered:** OS/process-level time faking (`libfaketime`,
+monkeypatching `time.time`/`datetime.now` globally so *any* code in the
+process sees virtual time without changing it); SDK-level clock
+injection (`pg_sdk.SimulatedClock`, explicitly asked for its `.now()` and
+explicitly `await`ed for `.sleep()`).
+
+**Chosen:** SDK-level injection - exactly the choice the spec's own
+design-decision list names for this milestone.
+
+**Why:** Global time faking is a deeper, riskier intervention (it changes
+what *every* library in the process observes, including ones the
+platform doesn't control - logging timestamps, TLS certificate
+validation, retry backoff math elsewhere in the dependency tree) for a
+narrower benefit: this platform only needs to control time for the parts
+of an agent's own logic that explicitly ask the clock, because those are
+the parts a scenario is allowed to simulate. Code that reads the real OS
+clock directly instead of asking `pg_sdk`'s clock is, by construction,
+outside what gets simulated - a visible, deliberate boundary instead of
+a global override that could silently break something unrelated.
+
+**Cost:** An agent integration that wants virtual time has to actually
+use the injected clock (`clock.now()`, `await clock.sleep(...)`) instead
+of `datetime.now()`/`asyncio.sleep()` directly - a real integration
+cost, paid once per agent, same shape as decision 12's (SDK stays
+provider/mechanism-agnostic; the agent does the plumbing).
+
+## 17. Timer ordering: a min-heap keyed by (wake_time, insertion sequence)
+
+**Options considered:** Release every pending waiter on every
+`advance()` call regardless of its deadline (simplest, but wrong -
+doesn't honor "timers and waits jump forward instantly" *to the right
+point*, it just fires everything whenever asked); a min-heap ordered by
+wake time alone; a min-heap ordered by (wake_time, insertion sequence)
+to break ties deterministically.
+
+**Chosen:** The sequence-tie-broken heap (`SimulatedClock._pending`).
+
+**Why:** `heapq` needs a total order over its entries, and two
+`asyncio.Event` objects with the same wake time have no ordering
+relationship at all - without the sequence counter, a tie would raise
+`TypeError` the first time it happened, not just behave
+unpredictably. The sequence number also makes the tie-breaking rule
+itself meaningful rather than arbitrary: two timers waking at the exact
+same simulated instant resolve in the order they started waiting,
+matching what a reader would expect from "first come, first served."
+Verified live with a real race (`test_timers_released_in_wake_time_order_not_registration_order`
+registers the later-waking timer FIRST, confirms it still resolves
+second) and a real tie (`test_same_deadline_releases_in_registration_order`).
+
+**Cost:** None found - `itertools.count()` for the sequence is one line,
+and the ordering guarantee is exactly what a discrete-event simulation
+needs regardless of this project's specific use case.
+
+## 18. Proved as an SDK primitive, not retrofitted into the reference agent
+
+**Options considered:** Add a multi-day wait to the reference agent's
+own customer-support domain (e.g. "I'll check back on this in 3 days")
+specifically so there's an agent-level scenario to exercise virtual
+time; prove the clock mechanism itself with a dedicated benchmark script
+and unit tests, leave the reference agent's actual domain logic alone.
+
+**Chosen:** The latter -
+`scripts/benchmark_virtual_time.py` and `sdk/pg_sdk/tests/test_clock.py`
+prove the mechanism; nothing was added to `reference_agent`'s own
+behavior this milestone.
+
+**Why:** A customer-support agent that looks up orders and issues
+refunds has no honest reason to wait three days mid-conversation -
+adding one just to have something to point at would be scope creep in
+the other direction this project's own rules warn against (features
+added because they're easy to demo, not because anything needs them).
+The spec's "multi-day scenarios run in seconds" claim is about the
+*platform's* capability, which is fully provable at the SDK layer: a
+real measured benchmark (0.08ms wall-clock for a 72-hour simulated wait)
+proves the mechanism works, and `RecordingClock`'s new `clock` parameter
+means any future scenario that *does* need multi-day waits (Milestone
+6's scheduler, or a later agent with an actual async workflow) can pass
+a `SimulatedClock` with zero changes to `pg_sdk` itself.
+
+**Cost:** No end-to-end proof yet of virtual time flowing through a real
+agent conversation (only through the standalone primitive). Accepted
+explicitly rather than faked - revisit when a real scenario needs it,
+which is likely Milestone 6 (the distributed engine, which will be the
+thing actually constructing `SimulatedClock` instances per simulation).
+
+---
+
+## Real bugs found while building Milestone 5
+
+None. The one place this could have gone wrong - `heapq` comparing two
+`asyncio.Event` objects on a wake-time tie - was caught by thinking
+through the heap's ordering requirement before writing the code, not by
+hitting the `TypeError` and working backward.

@@ -209,3 +209,44 @@ a replay is than the original live run, now that no network calls
 happen) wasn't measured this milestone - worth doing once there's a
 reason to care about replay speed specifically, e.g. Milestone 6's kill
 tests re-running failed simulations at volume.
+
+---
+
+## Milestone 5: Virtual time
+
+### Virtual-time speedup (the spec's own target metric, Milestone 1's table)
+
+**What:** Real wall-clock time for a 72-hour simulated wait against
+`pg_sdk.SimulatedClock`, versus the 72 real hours that wait would cost
+against a real clock.
+
+**How measured:** `scripts/benchmark_virtual_time.py` - creates a task
+that `await`s `clock.sleep(72 * 3600)`, immediately calls
+`clock.advance(72 * 3600)`, times the whole thing with
+`time.perf_counter()`. Run 5 times in a row on the same machine as
+Milestone 1's numbers (Apple M2, macOS 26.5.2).
+
+| Run | Real wall-clock time for the 72h wait |
+| --- | --- |
+| 1 | 0.070ms |
+| 2 | 0.087ms |
+| 3 | 0.078ms |
+| 4 | 0.084ms |
+| 5 | 0.077ms |
+
+**Spec's own starting target:** under 10 seconds for a 72-hour scenario
+(Milestone 1's benchmarks table, "Virtual-time speedup" row). **Measured:
+~0.08ms** - about 125,000x inside that target, and roughly 3.3 billion
+times faster than the real 72-hour wait it stands in for.
+
+This measures the clock primitive alone, not an end-to-end agent
+scenario spanning simulated days (decision 18 - no such scenario exists
+yet). The number that will matter later is wall-clock time for a real
+multi-day *agent* scenario once one exists, not just the bare clock
+mechanism - this is the floor that number can't beat, not the ceiling.
+
+### What's deliberately not benchmarked yet
+
+Carried over from Milestones 1-4, plus: virtual time under concurrent
+load (many simulated clocks / many pending timers at once) - meaningless
+before Milestone 6's distributed engine exists to generate that load.
